@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { getCacheDir, isTauri } from '@/api'
 
 /** 主题模式：system 跟随系统 / light 固定浅色 / dark 固定深色 */
@@ -13,10 +13,11 @@ function applyDarkClass(isDark: boolean) {
 
 export const useAppStore = defineStore('app', () => {
   const isDark = ref(false)
-  const themeColor = ref('#667eea')
-  const sidebarCollapsed = ref(false)
-  const autoPlay = ref(true)
-  const showLyrics = ref(true)
+  // ---- 设置项（localStorage 持久化，定义时恢复）----
+  const themeColor = ref(localStorage.getItem('wbmusic.themeColor') || '#667eea')
+  const sidebarCollapsed = ref(localStorage.getItem('wbmusic.sidebarCollapsed') === '1')
+  const autoPlay = ref(localStorage.getItem('wbmusic.autoPlay') !== '0')
+  const showLyrics = ref(localStorage.getItem('wbmusic.showLyrics') !== '0')
 
   /** 主题模式：跟随系统 / 浅色 / 深色（localStorage 持久化） */
   const themeMode = ref<ThemeMode>('system')
@@ -29,7 +30,7 @@ export const useAppStore = defineStore('app', () => {
 
   // 初始化缓存路径：
   // 1. 用户手动设置过 → 直接使用
-  // 2. Tauri 环境 → 从后端获取完整缓存目录（如 C:\Users\xxx\AppData\Local\com.wbmusic.app\cache）
+  // 2. Tauri 环境 → 从后端获取缓存目录（默认在安装位置下，如 D:\Program Files\WBMusic\cache）
   // 3. 浏览器降级 → WBMusic/cache
   async function initCachePath() {
     const saved = localStorage.getItem('wbmusic.cachePath')
@@ -115,6 +116,14 @@ export const useAppStore = defineStore('app', () => {
     cachePath.value = path
     localStorage.setItem('wbmusic.cachePath', path)
   }
+
+  // ---- 设置项持久化：任何改动（含组件直接赋值）统一落盘 ----
+  watch([themeColor, sidebarCollapsed, autoPlay, showLyrics], ([c, s, a, l]) => {
+    localStorage.setItem('wbmusic.themeColor', c)
+    localStorage.setItem('wbmusic.sidebarCollapsed', s ? '1' : '0')
+    localStorage.setItem('wbmusic.autoPlay', a ? '1' : '0')
+    localStorage.setItem('wbmusic.showLyrics', l ? '1' : '0')
+  })
 
   // 初始化主题模式（缓存路径已在定义处初始化）
   initThemeMode()

@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import type { Track } from '@/api'
+import { useAppStore } from './app'
 
 /** localStorage 播放记录键名 */
 const STORAGE_KEY = 'wbmusic:player-state'
@@ -31,15 +32,27 @@ export const usePlayerStore = defineStore('player', () => {
     currentIndex.value >= 0 ? playlist.value[currentIndex.value] ?? null : null,
   )
 
+  /** 下一首歌曲（按当前播放模式推算；shuffle 无法确定时按顺序下一首作为参考） */
+  const nextTrackInfo = computed<Track | null>(() => {
+    if (playlist.value.length === 0 || currentIndex.value < 0) return null
+    if (playMode.value === 'one') return currentTrack.value
+    const next = (currentIndex.value + 1) % playlist.value.length
+    return playlist.value[next] ?? null
+  })
+
   // ---- 播放状态 ----
   const isPlaying = ref(false)
   const progress = ref(0) // 0-100
+  const currentSec = ref(0) // 音频真实当前秒数（歌词同步用）
   const volume = ref(30) // 0-100
   const isLiked = ref(false)
 
   // ---- 播放模式 ----
   type PlayMode = 'list' | 'one' | 'shuffle'
   const playMode = ref<PlayMode>('list')
+
+  // ---- 全局设置（自动播放开关等）----
+  const appStore = useAppStore()
 
   // ---- 全局唯一音频实例 ----
   const audio = new Audio()
@@ -127,6 +140,7 @@ export const usePlayerStore = defineStore('player', () => {
   audio.addEventListener('timeupdate', () => {
     // 无条件记录当前进度（duration 未知时也保存，避免流媒体加载期丢进度）
     lastSavedTime = audio.currentTime
+    currentSec.value = audio.currentTime
     if (audio.duration && !Number.isNaN(audio.duration)) {
       progress.value = (audio.currentTime / audio.duration) * 100
       totalSeconds = audio.duration
@@ -256,6 +270,7 @@ export const usePlayerStore = defineStore('player', () => {
       audio.currentTime = (percent / 100) * audio.duration
       // 拖动进度条（含暂停时拖动）后立即记录新位置并保存
       lastSavedTime = audio.currentTime
+      currentSec.value = audio.currentTime
       scheduleSave()
     }
   }
@@ -269,7 +284,7 @@ export const usePlayerStore = defineStore('player', () => {
     if (playlist.value.length === 0) return
     currentIndex.value =
       (currentIndex.value - 1 + playlist.value.length) % playlist.value.length
-    loadCurrent()
+    loadCurrent(appStore.autoPlay)
   }
 
   function nextTrack() {
@@ -281,13 +296,17 @@ export const usePlayerStore = defineStore('player', () => {
     } else {
       currentIndex.value = (currentIndex.value + 1) % playlist.value.length
     }
-    loadCurrent()
+    loadCurrent(appStore.autoPlay)
   }
 
   function cyclePlayMode() {
     const order: PlayMode[] = ['list', 'one', 'shuffle']
     const index = order.indexOf(playMode.value)
     playMode.value = order[(index + 1) % order.length]
+  }
+
+  function setPlayMode(mode: PlayMode) {
+    playMode.value = mode
   }
 
   function toggleLike() {
@@ -391,8 +410,11 @@ export const usePlayerStore = defineStore('player', () => {
     playlist,
     currentIndex,
     currentTrack,
+    nextTrackInfo,
     isPlaying,
     progress,
+    currentSec,
+    audioDuration,
     volume,
     isLiked,
     playMode,
@@ -408,6 +430,7 @@ export const usePlayerStore = defineStore('player', () => {
     prevTrack,
     nextTrack,
     cyclePlayMode,
+    setPlayMode,
     toggleLike,
     pauseAll,
     removeTrack,

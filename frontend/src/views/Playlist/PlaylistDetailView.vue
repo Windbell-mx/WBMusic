@@ -171,17 +171,23 @@ const columns: DataTableColumns<Track> = [
     key: 'title',
     width: 300,
     render: (row) => {
-      return h(NSpace, { align: 'center' }, [
-        h(NIcon, { component: Mic }),
-        h(
-          'a',
-          {
-            style: 'cursor: pointer; color: inherit; text-decoration: none',
-            onClick: () => playSingle(row),
-          },
-          row.title,
-        ),
-      ])
+      return h(
+        NSpace,
+        { align: 'center' },
+        {
+          default: () => [
+            h(NIcon, { component: Mic }),
+            h(
+              'a',
+              {
+                style: 'cursor: pointer; color: inherit; text-decoration: none',
+                onClick: () => playSingle(row),
+              },
+              row.title,
+            ),
+          ],
+        },
+      )
     },
   },
   {
@@ -199,10 +205,16 @@ const columns: DataTableColumns<Track> = [
     key: 'duration',
     width: 80,
     render: (row) => {
-      return h(NSpace, { align: 'center' }, [
-        h(NIcon, { component: Time, size: 14 }),
-        h('span', null, row.duration),
-      ])
+      return h(
+        NSpace,
+        { align: 'center' },
+        {
+          default: () => [
+            h(NIcon, { component: Time, size: 14 }),
+            h('span', null, row.duration),
+          ],
+        },
+      )
     },
   },
   {
@@ -210,22 +222,28 @@ const columns: DataTableColumns<Track> = [
     key: 'actions',
     width: 100,
     render: (row) => {
-      return h(NSpace, null, [
-        h(
-          NButton,
-          {
-            text: true,
-            type: row.isLiked ? 'primary' : undefined,
-            onClick: () => toggleLike(row),
-          },
-          { default: () => h(NIcon, { component: Star }) }
-        ),
-        h(
-          NButton,
-          { text: true },
-          { default: () => h(NIcon, { component: Ellipse }) }
-        ),
-      ])
+      return h(
+        NSpace,
+        null,
+        {
+          default: () => [
+            h(
+              NButton,
+              {
+                text: true,
+                type: row.isLiked ? 'primary' : undefined,
+                onClick: () => toggleLike(row),
+              },
+              { default: () => h(NIcon, { component: Star }) }
+            ),
+            h(
+              NButton,
+              { text: true },
+              { default: () => h(NIcon, { component: Ellipse }) }
+            ),
+          ],
+        },
+      )
     },
   },
 ]

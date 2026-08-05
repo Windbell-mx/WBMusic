@@ -245,12 +245,15 @@ fn credential_plain(credential: &LoginCredential) -> Option<String> {
 }
 
 /// 获取应用缓存目录（完整绝对路径），不存在则创建
+/// 默认使用安装位置（exe 所在目录）下的 cache 目录，避免占用 C 盘 AppData
 #[tauri::command]
-pub fn get_cache_dir(app: tauri::AppHandle) -> Result<String, String> {
-    let dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| format!("获取缓存目录失败: {}", e))?;
+pub fn get_cache_dir(_app: tauri::AppHandle) -> Result<String, String> {
+    let exe_dir = std::env::current_exe()
+        .map_err(|e| format!("获取可执行文件路径失败: {}", e))?
+        .parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| "获取可执行文件所在目录失败".to_string())?;
+    let dir = exe_dir.join("cache");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建缓存目录失败: {}", e))?;
     Ok(dir.to_string_lossy().into_owned())
 }

@@ -18,13 +18,17 @@
           <span>{{ currentTrack?.album }}</span>
         </div>
       </div>
-      <n-button text class="header-btn" @click="showMessage('歌词功能开发中')">
-        <n-icon :component="DocumentText" size="22" />
+      <n-button text class="header-btn" @click="appStore.showLyrics = !appStore.showLyrics">
+        <n-icon
+          :component="DocumentText"
+          size="22"
+          :color="appStore.showLyrics ? appStore.themeColor : 'rgba(255,255,255,0.6)'"
+        />
       </n-button>
     </header>
 
     <!-- 中间主体：左侧唱片 + 右侧歌词 -->
-    <main class="player-main">
+    <main class="player-main" :class="{ 'no-lyrics': !appStore.showLyrics }">
       <!-- 左侧：唱片 -->
       <section class="disc-section">
         <div class="disc-wrap">
@@ -37,18 +41,37 @@
               object-fit="cover"
               :preview-disabled="true"
             />
-            <div v-else class="disc-cover disc-placeholder"></div>
+            <div
+              v-else
+              class="disc-cover disc-placeholder"
+              :style="{ backgroundColor: appStore.themeColor }"
+            >
+              <n-icon :component="MusicalNotes" class="disc-placeholder-icon" />
+            </div>
           </div>
         </div>
         <div class="track-tags">
-          <span class="tag">{{ currentTrack?.album || '未知专辑' }}</span>
-          <span class="tag">{{ currentTrack?.artist || '未知歌手' }}</span>
+          <span class="next-badge">下一首</span>
+          <div class="next-wrap">
+            <div class="next-scroll scrolling">
+              <div class="next-scroll-track">
+                <span class="next-group">
+                  <span class="next-title">{{ nextTrackInfo?.title || '暂无' }}</span>
+                  <span v-if="nextTrackInfo?.artist" class="next-artist"> - {{ nextTrackInfo.artist }}</span>
+                </span>
+                <span class="next-group" aria-hidden="true">
+                  <span class="next-title">{{ nextTrackInfo?.title || '暂无' }}</span>
+                  <span v-if="nextTrackInfo?.artist" class="next-artist"> - {{ nextTrackInfo.artist }}</span>
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
       <!-- 右侧：歌词 -->
-      <section class="lyric-section">
-        <div class="lyric-window">
+      <section v-if="appStore.showLyrics" class="lyric-section">
+        <div class="lyric-window" ref="lyricWindowEl">
           <div v-if="lyrics.length" class="lyric-list" :style="{ transform: lyricOffset }">
             <div
               v-for="(line, i) in lyrics"
@@ -175,15 +198,18 @@ import {
   List,
   Download,
   ShareSocial,
+  MusicalNotes,
 } from '@vicons/ionicons5'
 import { getLyrics, getPlaylistDetail, type MusicSource } from '@/api'
 import { usePlayerStore } from '@/stores/player'
+import { useAppStore } from '@/stores/app'
 import PlaylistPanel from '@/components/Player/PlaylistPanel.vue'
 
 const router = useRouter()
 const route = useRoute()
 const message = useMessage()
 const player = usePlayerStore()
+const appStore = useAppStore()
 
 // 播放列表面板开关
 const showPlaylistPanel = ref(false)
@@ -195,20 +221,34 @@ const volume = computed(() => player.volume)
 const isLiked = computed(() => player.isLiked)
 const playMode = computed(() => player.playMode)
 const currentTrack = computed(() => player.currentTrack)
+const nextTrackInfo = computed(() => player.nextTrackInfo)
 const currentTime = computed(() => player.currentTime)
 const modeTitle = computed(() => player.modeTitle)
 const nextModeTitle = computed(() => player.nextModeTitle)
 
-// 总时长（秒），用于进度换算
-let totalSeconds = 269
-
 // 歌词（时间单位为秒），无真实歌词时为空
 const lyrics = ref<{ time: number; text: string }[]>([])
 
+// 歌词窗口元素与高度（响应式，用于高亮行居中计算）
+const lyricWindowEl = ref<HTMLElement | null>(null)
+const lyricWindowH = ref(340)
+
+function updateLyricWindowH() {
+  lyricWindowH.value = lyricWindowEl.value?.offsetHeight ?? 340
+}
+
+// 歌词请求序号：防止快速切歌时旧请求晚返回覆盖新歌歌词
+let lyricReqSeq = 0
+
 async function loadLyrics() {
+  const seq = ++lyricReqSeq
+  // 切换到新曲目先清空歌词，避免上一首的歌词残留滚动
+  lyrics.value = []
   if (!currentTrack.value) return
   try {
     const text = await getLyrics(currentTrack.value.source, currentTrack.value.id)
+    // 请求期间已切到其他歌曲，丢弃过期结果
+    if (seq !== lyricReqSeq) return
     if (text) {
       // 解析 LRC 格式歌词
       const lines = text.split('\n')
@@ -223,17 +263,16 @@ async function loadLyrics() {
         .filter((l): l is { time: number; text: string } => l !== null && l.text.length > 0)
       if (lines.length > 0) {
         lyrics.value = lines
-        if (lines.length > 0) totalSeconds = Math.max(totalSeconds, lines[lines.length - 1].time + 10)
       }
     }
   } catch {
-    /* 保留默认歌词 */
+    /* 请求失败保持空（显示暂无歌词） */
   }
 }
 
-// 当前高亮歌词行（由进度实时计算）
+// 当前高亮歌词行（直接用音频真实当前秒数，与声音精确同步）
 const activeLyricIndex = computed(() => {
-  const currentSeconds = (progress.value / 100) * totalSeconds
+  const currentSeconds = player.currentSec
   let index = 0
   for (let i = 0; i < lyrics.value.length; i++) {
     if (currentSeconds >= lyrics.value[i].time) {
@@ -245,9 +284,11 @@ const activeLyricIndex = computed(() => {
   return index
 })
 
-// 歌词列表位移（让高亮行保持在窗口中央，行高 44px，窗口中心偏移 110px）
+// 歌词列表位移：让高亮行始终保持在歌词窗口中央
+// 窗口高 H，行高 44px → 高亮行中心应位于 H/2，列表位移 = H/2 - 行高/2 - 当前行号*44
 const lyricOffset = computed(() => {
-  return `translateY(${110 - activeLyricIndex.value * 44}px)`
+  const offset = lyricWindowH.value / 2 - 22
+  return `translateY(${offset - activeLyricIndex.value * 44}px)`
 })
 
 function goBack() {
@@ -279,7 +320,7 @@ function showMessage(content: string) {
 }
 
 function formatTooltip(value: number) {
-  const secs = Math.floor((value / 100) * totalSeconds)
+  const secs = Math.floor((value / 100) * (player.audioDuration || 0))
   const minutes = Math.floor(secs / 60)
   const seconds = secs % 60
   return minutes + ':' + seconds.toString().padStart(2, '0')
@@ -302,6 +343,9 @@ watch(
 )
 
 onMounted(() => {
+  // 测量歌词窗口实际高度（受窗口大小影响），用于高亮行居中
+  requestAnimationFrame(updateLyricWindowH)
+  window.addEventListener('resize', updateLyricWindowH)
   const playlistId = route.query.playlistId as string | undefined
   const source = (route.query.source as MusicSource) || 'netease'
 
@@ -327,6 +371,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('resize', updateLyricWindowH)
   // 不暂停播放：返回时底部 PlayerBar 继续播放
 })
 </script>
@@ -431,6 +476,12 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
+/* 隐藏歌词时：唱片居中单列 */
+.player-main.no-lyrics {
+  grid-template-columns: 1fr;
+  justify-items: center;
+}
+
 /* 左侧：唱片 */
 .disc-section {
   display: flex;
@@ -469,8 +520,16 @@ onBeforeUnmount(() => {
 }
 
 .disc-placeholder {
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.04));
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.disc-placeholder-icon {
+  font-size: 40%;
+  color: rgba(255, 255, 255, 0.9);
+  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.35));
 }
 
 .disc-hole {
@@ -481,9 +540,36 @@ onBeforeUnmount(() => {
   width: 12%;
   height: 12%;
   border-radius: 50%;
-  background: radial-gradient(circle, #667eea 0%, #764ba2 100%);
-  box-shadow: 0 0 12px rgba(102, 126, 234, 0.7);
+  /* 玻璃透镜基底：中心略亮的深色，边缘过渡到唱片 */
+  background: radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.5) 0%, rgba(255, 255, 255, 0.08) 8%, transparent 22%),
+    radial-gradient(circle, #14141d 0%, #0a0a11 45%, #23232e 100%);
+  box-shadow:
+    inset 0 2px 8px rgba(0, 0, 0, 0.95),
+    inset -2px -4px 10px rgba(255, 255, 255, 0.08),
+    0 0 16px rgba(255, 255, 255, 0.12),
+    0 0 0 2px rgba(255, 255, 255, 0.05);
   z-index: 2;
+  overflow: hidden;
+}
+
+/* 折射光线（随唱片整体旋转，不再独立自转，保证与封面同速） */
+.disc-hole::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    rgba(255, 255, 255, 0.3) 16deg,
+    rgba(255, 255, 255, 0.06) 42deg,
+    transparent 85deg,
+    transparent 170deg,
+    rgba(102, 126, 234, 0.25) 200deg,
+    rgba(255, 255, 255, 0.08) 225deg,
+    transparent 265deg,
+    transparent 360deg
+  );
 }
 
 .disc.spinning {
@@ -501,17 +587,76 @@ onBeforeUnmount(() => {
 
 .track-tags {
   display: flex;
+  align-items: center;
   gap: 10px;
+  width: min(320px, 60vw);
+  min-height: 26px;
 }
 
-.tag {
-  padding: 5px 14px;
-  border-radius: 999px;
+.next-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.next-wrap {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.next-scroll {
+  overflow: hidden;
+  white-space: nowrap;
+  min-width: 0;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.next-scroll-track {
+  display: inline-flex;
+  white-space: nowrap;
+  will-change: transform;
+  align-items: baseline;
+}
+
+.next-scroll.scrolling .next-scroll-track {
+  animation: next-marquee 8s linear infinite;
+}
+
+.next-group {
+  display: inline-flex;
+  white-space: nowrap;
+  align-items: baseline;
+  padding-right: 48px;
+}
+
+.next-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.95);
+  text-shadow: 0 0 8px rgba(255, 255, 255, 0.25);
+  letter-spacing: 0.5px;
+}
+
+.next-artist {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.85);
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(8px);
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.6);
+  text-shadow: 0 0 6px rgba(255, 255, 255, 0.12);
+  margin-left: 6px;
+}
+
+@keyframes next-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
 }
 
 /* 右侧：歌词 */
@@ -552,7 +697,6 @@ onBeforeUnmount(() => {
 .lyric-list {
   display: flex;
   flex-direction: column;
-  padding-top: 110px;
   transition: transform 0.5s ease;
 }
 
@@ -574,9 +718,16 @@ onBeforeUnmount(() => {
 }
 
 .lyric-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
-  font-size: 14px;
-  color: rgba(255, 255, 255, 0.35);
+  font-size: 16px;
+  letter-spacing: 1px;
+  color: rgba(255, 255, 255, 0.6);
+  user-select: none;
 }
 
 /* 底部控制区 */

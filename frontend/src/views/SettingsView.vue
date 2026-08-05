@@ -32,7 +32,7 @@
                   <span class="setting-label">主题模式</span>
                   <span class="setting-desc">跟随系统自动切换，或手动选择浅色 / 深色</span>
                 </div>
-                <n-radio-group v-model:value="themeMode" @update:value="handleThemeChange">
+                <n-radio-group v-model:value="themeMode">
                   <n-radio-button :value="'system'">跟随系统</n-radio-button>
                   <n-radio-button :value="'light'">浅色</n-radio-button>
                   <n-radio-button :value="'dark'">深色</n-radio-button>
@@ -213,12 +213,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, type Component } from 'vue'
+import { ref, computed, type Component } from 'vue'
 import { useMessage } from 'naive-ui'
 import { useAppStore, type ThemeMode } from '@/stores/app'
+import { usePlayerStore } from '@/stores/player'
 import { ColorPalette, Options, Server, InformationCircle } from '@vicons/ionicons5'
 
 const appStore = useAppStore()
+const player = usePlayerStore()
 const message = useMessage()
 
 type SectionKey = 'appearance' | 'player' | 'storage' | 'about'
@@ -232,13 +234,27 @@ const navItems: { key: SectionKey; label: string; icon: Component }[] = [
   { key: 'about', label: '关于', icon: InformationCircle },
 ]
 
-const themeMode = ref<ThemeMode>(appStore.themeMode)
-const playMode = ref('listLoop')
-const volume = ref(30)
+/** 主题模式：双向绑定 app store（持久化） */
+const themeMode = computed<ThemeMode>({
+  get: () => appStore.themeMode,
+  set: (v) => appStore.setThemeMode(v),
+})
+
+/** 默认播放模式：绑定真实播放器状态（持久化） */
+const playMode = computed({
+  get: () => player.playMode,
+  set: (v) => player.setPlayMode(v),
+})
+
+/** 默认音量：绑定真实播放器音量（持久化） */
+const volume = computed({
+  get: () => player.volume,
+  set: (v) => player.setVolume(v),
+})
 
 const playModeOptions = [
-  { label: '列表循环', value: 'listLoop' },
-  { label: '单曲循环', value: 'singleLoop' },
+  { label: '列表循环', value: 'list' },
+  { label: '单曲循环', value: 'one' },
   { label: '随机播放', value: 'shuffle' },
 ]
 
@@ -250,10 +266,6 @@ const themeColorOptions = [
   { label: '活力橙', value: '#fa8c16' },
   { label: '少女粉', value: '#eb2f96' },
 ]
-
-function handleThemeChange(value: ThemeMode) {
-  appStore.setThemeMode(value)
-}
 
 function handleThemeColor(color: string) {
   appStore.setThemeColor(color)

@@ -130,7 +130,7 @@ export async function getTrackUrl(source: MusicSource, trackId: string): Promise
 }
 
 /**
- * 获取应用缓存目录（完整绝对路径）
+ * 获取应用缓存目录（完整绝对路径），默认位于安装位置下
  */
 export async function getCacheDir(): Promise<string> {
   if (isTauri) {
