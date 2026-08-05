@@ -1,0 +1,14 @@
+# wbmusic 项目本地 cargo 镜像配置（rsproxy.cn 国内加速）
+# 如果网络良好，可删除本文件恢复官方源
+
+[source.crates-io]
+replace-with = 'rsproxy-sparse'
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[registries.rsproxy]
+index = "https://rsproxy.cn/crates.io-index"
+
+[net]
+git-fetch-with-cli = true

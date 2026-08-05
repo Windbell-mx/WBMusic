@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>wbmusic</title>
+    <script>
+      // 在应用加载前应用已保存的主题，避免启动时闪烁
+      // 与 frontend/src/stores/app.ts 中的 THEME_MODE_KEY 保持一致
+      ;(function () {
+        try {
+          var mode = localStorage.getItem('wbmusic.themeMode')
+          var dark
+          if (mode === 'dark') {
+            dark = true
+          } else if (mode === 'light') {
+            dark = false
+          } else {
+            dark =
+              window.matchMedia &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches
+          }
+          if (dark) {
+            document.documentElement.classList.add('dark')
+          }
+          document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+        } catch (e) {
+          /* localStorage 不可用时保持默认 */
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
