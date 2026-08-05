@@ -1,10 +1,18 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import type { Track } from '@/api'
+import { isTauri } from '@/api'
+import { createDiscreteApi } from 'naive-ui'
 import { useAppStore } from './app'
 
 /** localStorage 播放记录键名 */
 const STORAGE_KEY = 'wbmusic:player-state'
+
+/** 浏览器调试环境播放失败时的演示音频（仅非 Tauri 环境使用） */
+const DEMO_AUDIO_URL = 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3'
+
+/** 全局消息提示（discrete API，可在非组件环境调用） */
+const { message } = createDiscreteApi(['message'])
 
 interface SavedPlayerState {
   version: number
@@ -54,6 +62,9 @@ export const usePlayerStore = defineStore('player', () => {
   // ---- 全局设置（自动播放开关等）----
   const appStore = useAppStore()
 
+  /** 连续播放失败计数（防止自动跳歌死循环） */
+  let consecutiveFailures = 0
+
   // ---- 全局唯一音频实例 ----
   const audio = new Audio()
   let audioUrl = ''
@@ -99,7 +110,10 @@ export const usePlayerStore = defineStore('player', () => {
       if (Array.isArray(s.playlist)) {
         playlist.value = s.playlist.filter(
           (t): t is Track =>
-            !!t && typeof t.id !== 'undefined' && typeof t.title === 'string',
+            !!t &&
+            typeof t.id !== 'undefined' &&
+            typeof t.title === 'string' &&
+            !String(t.id).includes('-mock-'), // 过滤历史遗留的演示歌曲
         )
       }
       if (
@@ -199,6 +213,25 @@ export const usePlayerStore = defineStore('player', () => {
     loadCurrent()
   }
 
+  /** 真机环境播放失败处理：提示失败原因并自动跳过（带死循环保护） */
+  function handleLoadFailure(track: Track, e: unknown) {
+    consecutiveFailures++
+    const reason =
+      e instanceof Error && e.message && e.message !== '未获取到有效播放地址'
+        ? e.message
+        : '可能为 VIP 专享或无版权'
+    // 播放列表只剩一首，或整圈全部失败：停止播放，避免无限跳歌
+    if (playlist.value.length <= 1 || consecutiveFailures >= playlist.value.length) {
+      consecutiveFailures = 0
+      audio.pause()
+      audio.removeAttribute('src')
+      message.warning(`「${track.title}」无法播放：${reason}`)
+      return
+    }
+    message.error(`「${track.title}」播放失败已自动跳过：${reason}`)
+    nextTrack()
+  }
+
   async function loadCurrent(autoPlay = true) {
     const track = currentTrack.value
     if (!track) return
@@ -206,34 +239,39 @@ export const usePlayerStore = defineStore('player', () => {
     progress.value = 0
     totalSeconds = 0
     audioDuration.value = 0
-    // 通过后端获取播放地址（浏览器环境回退演示音频）
     try {
       const { getTrackUrl } = await import('@/api')
       const url = await getTrackUrl(track.source, String(track.id))
-      if (url && url.startsWith('http')) {
-        if (audioUrl) URL.revokeObjectURL(audioUrl)
-        audioUrl = url
-        audio.src = url
-        audio.load()
-        applyResumeSeek()
-        if (autoPlay) {
-          audio.play().catch(() => {
-            /* 自动播放被浏览器拦截时静默 */
-          })
-        }
+      if (!url || !url.startsWith('http')) {
+        throw new Error('未获取到有效播放地址')
+      }
+      if (audioUrl) URL.revokeObjectURL(audioUrl)
+      audioUrl = url
+      audio.src = url
+      audio.load()
+      applyResumeSeek()
+      if (autoPlay) {
+        audio.play().catch(() => {
+          /* 自动播放被浏览器拦截时静默 */
+        })
+      }
+      consecutiveFailures = 0 // 播放成功，重置失败计数
+    } catch (e) {
+      if (isTauri) {
+        // 真机环境：明确提示并自动跳过，绝不静默播放测试音频
+        handleLoadFailure(track, e)
         return
       }
-    } catch {
-      /* 回退 */
-    }
-    audio.src = 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3'
-    audioUrl = ''
-    audio.load()
-    applyResumeSeek()
-    if (autoPlay) {
-      audio.play().catch(() => {
-        /* 自动播放被浏览器拦截时静默 */
-      })
+      // 浏览器调试环境：回退演示音频，保证开发体验
+      audio.src = DEMO_AUDIO_URL
+      audioUrl = ''
+      audio.load()
+      applyResumeSeek()
+      if (autoPlay) {
+        audio.play().catch(() => {
+          /* 自动播放被浏览器拦截时静默 */
+        })
+      }
     }
   }
 
