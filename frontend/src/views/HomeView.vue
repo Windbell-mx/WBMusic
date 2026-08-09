@@ -11,6 +11,75 @@
           </p>
         </div>
 
+        <!-- 推荐歌单（匿名可用） -->
+        <section class="recommend-section">
+          <div class="recommend-head">
+            <h2 class="recommend-title">发现音乐</h2>
+            <div class="recommend-tabs">
+              <div
+                v-for="tab in platformTabs"
+                :key="tab.key"
+                class="recommend-tab"
+                :class="{ active: activeRecTab === tab.key }"
+                @click="switchPlatform(tab.key)"
+              >
+                {{ tab.label }}
+              </div>
+            </div>
+          </div>
+
+          <!-- 二级分类标签 -->
+          <div class="category-tabs">
+            <div
+              v-for="cat in currentCategories"
+              :key="cat.key"
+              class="category-tab"
+              :class="{ active: activeCategory === cat.key }"
+              @click="switchCategory(cat.key)"
+            >
+              {{ cat.label }}
+            </div>
+          </div>
+
+          <n-spin :show="recLoading">
+            <div v-if="!recLoading && recError" class="rec-state">
+              {{ recError }}<span class="rec-retry" @click="loadRecommend">点击重试</span>
+            </div>
+            <div v-else-if="!recLoading && !recPlaylists.length" class="rec-state">
+              暂无内容
+            </div>
+            <div v-else class="recommend-row">
+              <div
+                v-for="p in recPlaylists"
+                :key="p.id"
+                class="rec-card"
+                @click="openPlaylist(p)"
+              >
+                <div class="rec-cover">
+                  <n-image
+                    :src="p.cover_url || fallbackCover(p)"
+                    :alt="p.name"
+                    class="rec-img"
+                    object-fit="cover"
+                    :preview-disabled="true"
+                  />
+                  <span class="source-badge" :class="`source-${p.source}`">
+                    {{ sourceLabel(p.source) }}
+                  </span>
+                  <span class="play-count" v-if="p.play_count > 0">
+                    <n-icon :component="Headset" size="11" />
+                    {{ formatPlays(p.play_count) }}
+                  </span>
+                </div>
+                <div class="rec-name" :title="p.name">{{ p.name }}</div>
+                <div class="rec-desc" :title="p.description || ''">
+                  {{ p.description || '暂无描述' }}
+                </div>
+              </div>
+            </div>
+          </n-spin>
+        </section>
+
         <!-- 未登录：登录引导 -->
         <div v-if="!anyLoggedIn" class="guide-card">
           <div class="guide-icon">
@@ -90,16 +159,21 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { NIcon, NButton, NSpace } from 'naive-ui'
+import { NIcon, NButton, NSpace, NSpin } from 'naive-ui'
 import {
   MusicalNotes,
   CheckmarkCircle,
   List,
   Search,
   Settings,
+  Headset,
 } from '@vicons/ionicons5'
-import type { MusicSource } from '@/api'
-import { getLoginStatus } from '@/api'
+import type { MusicSource, HomeCategory } from '@/api'
+import {
+  getLoginStatus,
+  getCategoryPlaylists,
+  type Playlist as ApiPlaylist,
+} from '@/api'
 import LoginModal from '@/components/LoginModal.vue'
 
 const router = useRouter()
@@ -128,6 +202,125 @@ async function refreshLogin() {
   }
 }
 onMounted(refreshLogin)
+
+/* ---------- 发现音乐：平台 + 分类二级标签 ---------- */
+
+// 本地存储键：记住用户停留在哪个平台/分类，从歌单详情返回时保持状态
+const STORAGE_TAB = 'wbmusic.homeTab'
+const STORAGE_CATEGORY = 'wbmusic.homeCategory'
+
+interface PlatformTab {
+  key: MusicSource
+  label: string
+}
+
+interface CategoryTab {
+  key: HomeCategory
+  label: string
+}
+
+const platformTabs: PlatformTab[] = [
+  { key: 'netease', label: '网易云音乐' },
+  { key: 'qq_music', label: 'QQ 音乐' },
+]
+
+// 各平台支持的二级分类
+const platformCategories: Record<MusicSource, CategoryTab[]> = {
+  netease: [
+    { key: 'daily', label: '每日推荐' },
+    { key: 'featured', label: '精选' },
+    { key: 'hot', label: '热歌榜' },
+  ],
+  qq_music: [
+    { key: 'rec', label: '推荐' },
+    { key: 'hot', label: '排行榜' },
+  ],
+}
+
+// 恢复持久化的平台标签（默认网易云）
+const storedTab = localStorage.getItem(STORAGE_TAB) as MusicSource | null
+const activeRecTab = ref<MusicSource>(
+  storedTab === 'netease' || storedTab === 'qq_music' ? storedTab : 'netease',
+)
+
+// 恢复持久化的分类标签（默认该平台第一个分类）
+const storedCategory = localStorage.getItem(STORAGE_CATEGORY) as HomeCategory | null
+const activeCategory = ref<HomeCategory>(
+  storedCategory && platformCategories[activeRecTab.value].some((c) => c.key === storedCategory)
+    ? storedCategory
+    : platformCategories[activeRecTab.value][0].key,
+)
+
+const currentCategories = computed(() => platformCategories[activeRecTab.value])
+
+const recPlaylists = ref<ApiPlaylist[]>([])
+const recLoading = ref(false)
+const recError = ref('')
+
+async function loadRecommend() {
+  recLoading.value = true
+  recError.value = ''
+  try {
+    recPlaylists.value = await getCategoryPlaylists(
+      activeRecTab.value,
+      activeCategory.value,
+      10,
+    )
+  } catch (e) {
+    recError.value = '内容加载失败'
+    console.warn('加载分类歌单失败:', e)
+  } finally {
+    recLoading.value = false
+  }
+}
+
+function switchPlatform(key: MusicSource) {
+  if (key === activeRecTab.value) return
+  activeRecTab.value = key
+  // 切换平台时，分类重置为该平台默认分类
+  activeCategory.value = platformCategories[key][0].key
+  localStorage.setItem(STORAGE_TAB, key)
+  localStorage.setItem(STORAGE_CATEGORY, activeCategory.value)
+  loadRecommend()
+}
+
+function switchCategory(key: HomeCategory) {
+  if (key === activeCategory.value) return
+  activeCategory.value = key
+  localStorage.setItem(STORAGE_CATEGORY, key)
+  loadRecommend()
+}
+
+// 进入页面时先恢复持久化的状态再加载
+onMounted(() => {
+  localStorage.setItem(STORAGE_TAB, activeRecTab.value)
+  localStorage.setItem(STORAGE_CATEGORY, activeCategory.value)
+  loadRecommend()
+})
+
+function formatPlays(count: number) {
+  if (count >= 100000000) return (count / 100000000).toFixed(1) + '亿'
+  if (count >= 10000) return (count / 10000).toFixed(1) + '万'
+  return String(count)
+}
+
+function sourceLabel(source: MusicSource) {
+  return source === 'netease' ? '网易云' : 'QQ 音乐'
+}
+
+function fallbackCover(p: ApiPlaylist) {
+  return `https://picsum.photos/seed/${p.source}-${p.id}/400/400`
+}
+
+function openPlaylist(p: ApiPlaylist) {
+  router.push({
+    name: 'PlaylistDetail',
+    params: { id: p.id },
+    query: { source: p.source },
+  })
+}
+
+onMounted(loadRecommend)
 
 /* ---------- 登录弹窗 ---------- */
 
@@ -321,5 +514,187 @@ function goSettings() {
 .quick-entry:hover {
   background: var(--n-color-2);
   color: var(--n-text-color);
+}
+
+/* ===== 推荐歌单 ===== */
+.recommend-section {
+  margin-bottom: 28px;
+}
+
+.recommend-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.recommend-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--n-text-color);
+}
+
+.recommend-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--n-color-2);
+}
+
+.recommend-tab {
+  padding: 5px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  color: var(--n-text-color-3);
+  transition: color 0.2s, background 0.2s;
+}
+
+.recommend-tab:hover {
+  color: var(--n-text-color);
+}
+
+.recommend-tab.active {
+  color: #fff;
+  background: linear-gradient(120deg, #667eea 0%, #764ba2 100%);
+  font-weight: 600;
+}
+
+/* 二级分类标签 */
+.category-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.category-tab {
+  padding: 5px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  color: var(--n-text-color-3);
+  background: var(--n-color-2);
+  transition: color 0.2s, background 0.2s;
+}
+
+.category-tab:hover {
+  color: var(--n-text-color);
+}
+
+.category-tab.active {
+  color: #667eea;
+  background: rgba(102, 126, 234, 0.12);
+  font-weight: 600;
+}
+
+.recommend-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 20px;
+}
+
+.rec-card {
+  cursor: pointer;
+  transition: transform 0.2s ease;
+}
+
+.rec-card:hover {
+  transform: translateY(-3px);
+}
+
+.rec-cover {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  aspect-ratio: 1 / 1;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  transition: box-shadow 0.2s ease;
+}
+
+.rec-card:hover .rec-cover {
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+}
+
+.rec-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 10px;
+}
+
+.source-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.source-netease {
+  background: rgba(194, 59, 59, 0.85);
+}
+
+.source-qq_music {
+  background: rgba(22, 113, 255, 0.85);
+}
+
+.play-count {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.rec-name {
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--n-text-color);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rec-desc {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--n-text-color-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rec-state {
+  padding: 48px 0;
+  text-align: center;
+  font-size: 14px;
+  color: var(--n-text-color-3);
+}
+
+.rec-retry {
+  margin-left: 8px;
+  color: var(--n-primary-color);
+  cursor: pointer;
 }
 </style>

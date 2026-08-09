@@ -64,8 +64,8 @@
       </template>
     </n-alert>
 
-    <!-- 歌单网格（宽屏最多 6 列） -->
-    <n-grid cols="s:1 m:2 l:3 xl:4 2xl:6" x-gap="20" y-gap="28" responsive="screen">
+    <!-- 歌单网格（3 列布局，超窄屏回退 1 列） -->
+    <n-grid cols="s:1 m:3 l:3 xl:3 2xl:3" x-gap="20" y-gap="28" responsive="screen">
       <n-gi v-for="playlist in filteredPlaylists" :key="playlist.id">
         <div class="playlist-card" @click="selectPlaylist(playlist)">
           <div class="card-cover">

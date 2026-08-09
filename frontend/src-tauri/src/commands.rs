@@ -230,6 +230,58 @@ pub async fn get_playlist_detail(
     provider.get_playlist_detail(&playlist_id).await
 }
 
+/// 获取推荐歌单（热门/精品歌单，匿名可用）
+#[tauri::command]
+pub async fn get_recommended_playlists(
+    state: State<'_, AppState>,
+    source: String,
+    limit: Option<u32>,
+) -> Result<Vec<Playlist>, String> {
+    let kind = MusicProviderKind::from_str(&source)
+        .ok_or_else(|| format!("未知音乐源: {}", source))?;
+    let provider = state
+        .providers
+        .get(kind)
+        .ok_or_else(|| format!("音乐源未注册: {}", source))?;
+    provider.get_recommended_playlists(limit.unwrap_or(12)).await
+}
+
+/// 获取首页分类歌单（精选/热歌榜/每日推荐/我的歌单等）
+#[tauri::command]
+pub async fn get_category_playlists(
+    state: State<'_, AppState>,
+    source: String,
+    category: String,
+    limit: Option<u32>,
+) -> Result<Vec<Playlist>, String> {
+    let kind = MusicProviderKind::from_str(&source)
+        .ok_or_else(|| format!("未知音乐源: {}", source))?;
+    let provider = state
+        .providers
+        .get(kind)
+        .ok_or_else(|| format!("音乐源未注册: {}", source))?;
+    provider
+        .get_category_playlists(&category, limit.unwrap_or(10))
+        .await
+}
+
+/// 收藏/取消收藏歌曲（红心）。like=true 收藏到平台默认喜欢歌单，false 取消
+#[tauri::command]
+pub async fn like_track(
+    state: State<'_, AppState>,
+    source: String,
+    track_id: String,
+    like: bool,
+) -> Result<(), String> {
+    let kind = MusicProviderKind::from_str(&source)
+        .ok_or_else(|| format!("未知音乐源: {}", source))?;
+    let provider = state
+        .providers
+        .get(kind)
+        .ok_or_else(|| format!("音乐源未注册: {}", source))?;
+    provider.like_track(&track_id, like).await
+}
+
 /// 从凭据中提取明文（用于持久化）
 fn credential_plain(credential: &LoginCredential) -> Option<String> {
     match credential {

@@ -68,6 +68,9 @@
             <n-slider :value="volume" :step="0.01" class="volume-slider" :rail-style="{ backgroundColor: 'var(--n-border-color)' }" @update:value="onVolumeChange" />
             <n-icon :component="VolumeHigh" class="vol-icon" size="16" />
           </div>
+          <n-button text class="ctrl-btn" @click="showPlaylistPanel = true" title="播放列表">
+            <n-icon :component="List" size="18" />
+          </n-button>
           <n-button text class="ctrl-btn" @click="goToPlayer" title="打开播放页">
             <n-icon :component="Headset" size="18" />
           </n-button>
@@ -75,6 +78,11 @@
       </div>
     </n-layout-content>
   </n-layout>
+
+  <!-- 播放列表面板 -->
+  <Teleport to="body">
+    <PlaylistPanel v-model:visible="showPlaylistPanel" />
+  </Teleport>
 </template>
 
 <style scoped>
@@ -340,7 +348,7 @@
 </style>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { NIcon } from 'naive-ui'
 import {
@@ -355,11 +363,16 @@ import {
   VolumeLow,
   VolumeHigh,
   Headset,
+  List,
 } from '@vicons/ionicons5'
 import { usePlayerStore } from '@/stores/player'
+import PlaylistPanel from '@/components/Player/PlaylistPanel.vue'
 
 const router = useRouter()
 const player = usePlayerStore()
+
+// 播放列表面板开关
+const showPlaylistPanel = ref(false)
 
 // 从共享 store 解构（保持响应式需通过 storeToRefs 或用 store.xxx）
 const isPlaying = computed(() => player.isPlaying)

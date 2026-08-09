@@ -150,6 +150,24 @@ export async function getLyrics(source: MusicSource, trackId: string): Promise<s
   return null
 }
 
+/**
+ * 收藏/取消收藏歌曲（红心）
+ * @param source 音乐源
+ * @param trackId 歌曲 ID（网易云为数字 ID，QQ 为 songmid）
+ * @param like true=收藏（加入默认喜欢歌单），false=取消
+ */
+export async function likeTrack(
+  source: MusicSource,
+  trackId: string,
+  like: boolean,
+): Promise<void> {
+  if (isTauri) {
+    return invoke('like_track', { source, trackId, like })
+  }
+  // 浏览器降级：直接成功
+  return
+}
+
 /** 用户歌单 */
 export interface Playlist {
   id: string
@@ -201,4 +219,81 @@ export async function getPlaylistDetail(
     track_count: 0,
     tracks: [],
   }
+}
+
+/**
+ * 获取推荐歌单（热门/精品歌单，匿名可用，无需登录）
+ */
+export async function getRecommendedPlaylists(
+  source: MusicSource,
+  limit = 12,
+): Promise<Playlist[]> {
+  if (isTauri) {
+    return invoke<Playlist[]>('get_recommended_playlists', { source, limit })
+  }
+  // 浏览器降级：返回几条演示数据
+  const mockNames =
+    source === 'netease'
+      ? ['每日推荐', '华语流行', '欧美金曲', '轻音乐精选', 'ACG 音乐']
+      : ['QQ 热歌榜', '飙升榜', '说唱新势力', '民谣之声', '电影原声带']
+  return mockNames.map((name, i) => ({
+    id: `${source}-recommend-${i}`,
+    name,
+    description: '推荐歌单（演示）',
+    cover_url: `https://picsum.photos/seed/${source}-rec-${i}/400/400`,
+    track_count: 50 + i * 10,
+    play_count: 100000 * (i + 1),
+    source,
+  }))
+}
+
+/** 首页分类标识 */
+export type HomeCategory = 'featured' | 'hot' | 'daily' | 'rec'
+
+/**
+ * 获取首页分类歌单
+ *
+ * 网易云：featured=精选、hot=热歌榜、daily=每日推荐
+ * QQ 音乐：rec=推荐、hot=排行榜
+ */
+export async function getCategoryPlaylists(
+  source: MusicSource,
+  category: HomeCategory,
+  limit = 10,
+): Promise<Playlist[]> {
+  if (isTauri) {
+    return invoke<Playlist[]>('get_category_playlists', {
+      source,
+      category,
+      limit,
+    })
+  }
+  // 浏览器降级
+  if (source === 'netease' && category === 'daily') {
+    return [
+      {
+        id: 'netease:daily',
+        name: '每日推荐',
+        description: '根据你的口味每日更新的推荐歌曲',
+        cover_url: 'https://picsum.photos/seed/netease-daily/400/400',
+        track_count: 30,
+        play_count: 0,
+        source,
+      },
+    ]
+  }
+  // QQ 排行榜 mock：显示官方榜单名
+  if (source === 'qq_music' && category === 'hot') {
+    const mockCharts = ['巅峰榜·热歌', '巅峰榜·新歌', '巅峰榜·流行指数', '飙升榜', '国乐榜', '说唱榜']
+    return mockCharts.map((name, i) => ({
+      id: `qq:toplist:${i + 1}`,
+      name,
+      description: 'QQ 音乐官方排行榜',
+      cover_url: `https://picsum.photos/seed/qq-chart-${i}/400/400`,
+      track_count: 0,
+      play_count: 1000000 * (i + 1),
+      source,
+    }))
+  }
+  return getRecommendedPlaylists(source, limit)
 }

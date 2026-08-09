@@ -141,7 +141,7 @@ const menuOptions = [
   },
   {
     key: 'Playlist',
-    label: '歌单',
+    label: '我的',
     icon: () => h(NIcon, null, { default: () => h(List) }),
   },
   {

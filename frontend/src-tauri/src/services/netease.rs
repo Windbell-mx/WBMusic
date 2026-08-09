@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -160,6 +161,10 @@ impl NeteaseProvider {
             .validate_cookie(None)
             .await
             .map_err(|e| format!("获取用户信息失败（请确认已登录网易云）: {}", e))?;
+        // 注意：/api/user/playlist 存在 CDN 缓存，收藏/取消后立即刷新会返回过时
+        // 的 trackCount（实测可返回比实际还小的历史值，且加时间戳/改参数/POST
+        // 均无法绕过，缓存键固定）。因此下方对「我喜欢的音乐」歌单用
+        // /api/v6/playlist/detail 重新拉取最新数量覆盖（该接口无缓存问题）。
         let resp = self
             .client
             .get(format!(
@@ -182,12 +187,17 @@ impl NeteaseProvider {
             .as_array()
             .ok_or("用户歌单响应格式异常")?;
         let mut result = Vec::new();
+        // 「我喜欢的音乐」歌单在 result 中的位置（网易云 specialType == 5）
+        let mut like_index: Option<usize> = None;
         for p in playlists {
             // 跳过 0 首歌的空目录
             let track_count = p["trackCount"].as_u64().unwrap_or(0) as u32;
             let id = p["id"].as_i64().unwrap_or(0).to_string();
             if id == "0" {
                 continue;
+            }
+            if p["specialType"].as_i64().unwrap_or(0) == 5 {
+                like_index = Some(result.len());
             }
             result.push(Playlist {
                 id,
@@ -199,6 +209,13 @@ impl NeteaseProvider {
                 source: MusicProviderKind::Netease,
             });
         }
+        // 「我喜欢的音乐」数量以 v6 详情接口为准，避免 user/playlist 缓存旧值
+        if let Some(idx) = like_index {
+            let pid = result[idx].id.clone();
+            if let Ok(detail) = self.fetch_playlist_detail(&pid).await {
+                result[idx].track_count = detail.track_count;
+            }
+        }
         Ok(result)
     }
 
@@ -208,11 +225,30 @@ impl NeteaseProvider {
     /// 完整歌曲 ID 在 `trackIds` 中。因此这里先取 trackIds，再用
     /// `/api/v3/song/detail` 批量拉取全部歌曲详情，保证歌单歌曲完整。
     async fn fetch_playlist_detail(&self, playlist_id: &str) -> Result<PlaylistDetail, String> {
+        // 每日推荐特殊卡片：返回每日推荐歌曲列表
+        if playlist_id == "netease:daily" {
+            let tracks = self.fetch_daily_songs().await?;
+            return Ok(PlaylistDetail {
+                id: playlist_id.to_string(),
+                name: "每日推荐".to_string(),
+                description: Some("根据你的口味每日更新的推荐歌曲".to_string()),
+                cover_url: Some("https://p1.music.126.net/hoJ7XHlm8ZKUoQoLQkHsVQ==/109951165974797586.jpg".to_string()),
+                track_count: tracks.len() as u32,
+                tracks,
+            });
+        }
+
+        // 注意：/api/v6/playlist/detail 存在 CDN 缓存，收藏/取消后立即刷新
+        // 可能返回过时的 trackCount/trackIds，加时间戳参数绕过缓存。
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| format!("获取时间戳失败: {}", e))?
+            .as_millis();
         let resp = self
             .client
             .get(format!(
-                "{}/api/v6/playlist/detail?id={}",
-                API_BASE, playlist_id
+                "{}/api/v6/playlist/detail?id={}&_t={}",
+                API_BASE, playlist_id, ts
             ))
             .headers(self.cookie_headers()?)
             .send()
@@ -356,6 +392,178 @@ impl NeteaseProvider {
             track_count,
             tracks,
         })
+    }
+
+    /// 获取精品歌单（匿名可用，无需登录）
+    ///
+    /// 使用 POST `/api/playlist/highquality/list`，`cat=全部` 时返回
+    /// 全站热门精品歌单。
+    async fn fetch_recommended_playlists(&self, limit: u32) -> Result<Vec<Playlist>, String> {
+        let limit = limit.clamp(1, 50);
+        let limit_str = limit.to_string();
+        let resp = self
+            .client
+            .post(format!("{}/api/playlist/highquality/list", API_BASE))
+            .headers(self.base_headers())
+            .form(&[
+                ("limit", limit_str.as_str()),
+                ("cat", "全部"),
+                ("before", "0"),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("获取精品歌单失败: {}", e))?;
+        let j: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析精品歌单失败: {}", e))?;
+        let code = j["code"].as_i64().unwrap_or(-1);
+        if code != 200 {
+            return Err(format!("获取精品歌单失败 (code={})", code));
+        }
+        let playlists = j["playlists"]
+            .as_array()
+            .ok_or("精品歌单响应格式异常")?;
+        let result = playlists
+            .iter()
+            .map(|p| {
+                let id = p["id"].as_i64().unwrap_or(0).to_string();
+                Playlist {
+                    id,
+                    name: p["name"].as_str().unwrap_or("未命名歌单").to_string(),
+                    description: p["description"].as_str().map(|s| s.to_string()),
+                    cover_url: p["coverImgUrl"].as_str().map(|s| s.to_string()),
+                    track_count: p["trackCount"].as_u64().unwrap_or(0) as u32,
+                    play_count: p["playCount"].as_u64().unwrap_or(0),
+                    source: MusicProviderKind::Netease,
+                }
+            })
+            .collect();
+        Ok(result)
+    }
+
+    /// 获取每日推荐歌曲（匿名可用，无需登录）
+    ///
+    /// 使用 POST `/api/v3/discovery/recommend/songs`，form 为空即可。
+    /// 歌曲位于响应 `data.dailySongs`（30 首）。
+    async fn fetch_daily_songs(&self) -> Result<Vec<Track>, String> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/v3/discovery/recommend/songs",
+                API_BASE
+            ))
+            .headers(self.base_headers())
+            .form(&[] as &[(&str, &str)])
+            .send()
+            .await
+            .map_err(|e| format!("获取每日推荐失败: {}", e))?;
+        let j: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析每日推荐失败: {}", e))?;
+        let code = j["code"].as_i64().unwrap_or(-1);
+        if code != 200 {
+            return Err(format!("获取每日推荐失败 (code={})", code));
+        }
+        let songs = j["data"]["dailySongs"]
+            .as_array()
+            .ok_or("每日推荐响应格式异常（未找到 dailySongs）")?;
+        let tracks: Vec<Track> = songs
+            .iter()
+            .map(|s| {
+                let id = s["id"].as_i64().unwrap_or(0).to_string();
+                let title = s["name"].as_str().unwrap_or("未知歌曲").to_string();
+                let artist = s["ar"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x["name"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    })
+                    .unwrap_or_default();
+                let album = s["al"]["name"].as_str().map(|x| x.to_string());
+                let duration = s["dt"].as_u64().map(|d| (d / 1000) as u32);
+                let cover_url = s["al"]["picUrl"].as_str().map(|x| x.to_string());
+                Track {
+                    id,
+                    title,
+                    artist,
+                    album,
+                    duration,
+                    cover_url,
+                    source: MusicProviderKind::Netease,
+                }
+            })
+            .collect();
+        Ok(tracks)
+    }
+
+    /// 获取官方榜单歌单（匿名可用，无需登录）
+    ///
+    /// 使用 GET `/api/toplist/detail`，返回全部官方榜单，
+    /// 取前 limit 个展示为「热歌榜」分类。
+    async fn fetch_hot_charts(&self, limit: u32) -> Result<Vec<Playlist>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/api/toplist/detail", API_BASE))
+            .headers(self.base_headers())
+            .send()
+            .await
+            .map_err(|e| format!("获取榜单失败: {}", e))?;
+        let j: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析榜单失败: {}", e))?;
+        let code = j["code"].as_i64().unwrap_or(-1);
+        if code != 200 {
+            return Err(format!("获取榜单失败 (code={})", code));
+        }
+        let list = j["list"].as_array().ok_or("榜单响应格式异常")?;
+        let result: Vec<Playlist> = list
+            .iter()
+            .take(limit as usize)
+            .map(|t| {
+                Playlist {
+                    id: t["id"].as_i64().unwrap_or(0).to_string(),
+                    name: t["name"].as_str().unwrap_or("未知榜单").to_string(),
+                    description: t["updateFrequency"].as_str().map(|s| s.to_string()),
+                    cover_url: t["coverImgUrl"].as_str().map(|s| s.to_string()),
+                    track_count: t["trackNumber"].as_u64().unwrap_or(0) as u32,
+                    play_count: 0,
+                    source: MusicProviderKind::Netease,
+                }
+            })
+            .collect();
+        Ok(result)
+    }
+
+    /// 获取首页分类歌单
+    ///
+    /// - `featured`：精选（精品歌单）
+    /// - `hot`：热歌榜（官方榜单）
+    /// - `daily`：每日推荐（特殊卡片，进入详情后返回每日推荐歌曲）
+    /// - `mine`：我的歌单（需登录）
+    async fn fetch_category_playlists(&self, category: &str, limit: u32) -> Result<Vec<Playlist>, String> {
+        match category {
+            "featured" => self.fetch_recommended_playlists(limit).await,
+            "hot" => self.fetch_hot_charts(limit).await,
+            "daily" => {
+                // 每日推荐包装成一个特殊歌单卡片
+                Ok(vec![Playlist {
+                    id: "netease:daily".to_string(),
+                    name: "每日推荐".to_string(),
+                    description: Some("根据你的口味每日更新的推荐歌曲".to_string()),
+                    cover_url: Some("https://p1.music.126.net/hoJ7XHlm8ZKUoQoLQkHsVQ==/109951165974797586.jpg".to_string()),
+                    track_count: 30,
+                    play_count: 0,
+                    source: MusicProviderKind::Netease,
+                }])
+            }
+            "mine" => self.fetch_user_playlists().await,
+            _ => Err(format!("不支持的分类: {}", category)),
+        }
     }
 }
 
@@ -542,5 +750,60 @@ impl MusicProvider for NeteaseProvider {
 
     async fn get_playlist_detail(&self, playlist_id: &str) -> Result<PlaylistDetail, String> {
         self.fetch_playlist_detail(playlist_id).await
+    }
+
+    async fn get_recommended_playlists(&self, limit: u32) -> Result<Vec<Playlist>, String> {
+        self.fetch_recommended_playlists(limit).await
+    }
+
+    async fn get_category_playlists(&self, category: &str, limit: u32) -> Result<Vec<Playlist>, String> {
+        self.fetch_category_playlists(category, limit).await
+    }
+
+    async fn like_track(&self, track_id: &str, like: bool) -> Result<(), String> {
+        // 需登录（Cookie 必须有效），未登录直接报错
+        // 注意：MutexGuard 不是 Send，必须在 await 之前释放锁
+        let cookie = {
+            let guard = self
+                .session
+                .lock()
+                .map_err(|_| "会话锁获取失败".to_string())?;
+            if !guard.logged_in {
+                return Err("请先登录网易云音乐".into());
+            }
+            guard.credential.clone().unwrap_or_default()
+        };
+
+        // csrf_token 取自 Cookie 中的 __csrf 字段
+        let csrf = cookie
+            .split(';')
+            .find_map(|p| {
+                let p = p.trim();
+                p.strip_prefix("__csrf=").map(|v| v.to_string())
+            })
+            .unwrap_or_default();
+
+        let resp = self
+            .client
+            .post(format!("{}/api/song/like", API_BASE))
+            .headers(self.cookie_headers()?)
+            .form(&[
+                ("like", if like { "true" } else { "false" }),
+                ("trackId", track_id),
+                ("time", "25"),
+                ("csrf_token", &csrf),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("收藏请求失败: {}", e))?;
+        let j: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析收藏响应失败: {}", e))?;
+        let code = j["code"].as_i64().unwrap_or(-1);
+        if code != 200 {
+            return Err(format!("收藏失败 (code={})", code));
+        }
+        Ok(())
     }
 }

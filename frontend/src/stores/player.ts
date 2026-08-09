@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import type { Track } from '@/api'
-import { isTauri } from '@/api'
+import { isTauri, likeTrack } from '@/api'
 import { createDiscreteApi } from 'naive-ui'
 import { useAppStore } from './app'
 
@@ -348,7 +348,27 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function toggleLike() {
-    isLiked.value = !isLiked.value
+    // 需要当前曲目
+    const track = currentTrack.value
+    if (!track) return
+    const target = !isLiked.value
+    // 乐观更新
+    isLiked.value = target
+    // 浏览器环境直接模拟成功
+    if (!isTauri) {
+      scheduleSave()
+      return
+    }
+    likeTrack(track.source, track.id, target)
+      .then(() => {
+        message.success(target ? '已收藏到默认喜欢歌单' : '已取消收藏')
+        scheduleSave()
+      })
+      .catch((err: unknown) => {
+        // 失败回滚
+        isLiked.value = !target
+        message.error(`收藏失败：${err instanceof Error ? err.message : String(err)}`)
+      })
   }
 
   function pauseAll() {

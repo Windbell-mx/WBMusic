@@ -34,9 +34,14 @@
 
       <!-- 加载失败 -->
       <div v-else-if="!playlist" class="state-wrap">
-        <n-empty description="歌单加载失败">
+        <n-empty :description="needLogin ? '需要登录' : '歌单加载失败'">
           <template #extra>
-            <n-text depth="3">{{ errorMsg }}</n-text>
+            <n-text depth="3" style="display: block; margin-bottom: 16px; max-width: 480px">
+              {{ errorMsg }}
+            </n-text>
+            <n-button v-if="needLogin" type="primary" @click="openLogin">
+              去登录 {{ sourceLabel }}
+            </n-button>
           </template>
         </n-empty>
       </div>
@@ -74,18 +79,20 @@
         <n-data-table
           :columns="columns"
           :data="playlist.tracks || []"
-          :pagination="{ pageSize: 20 }"
           striped
         />
       </template>
     </n-layout-content>
   </n-layout>
+
+  <!-- 需要登录时弹出登录框 -->
+  <LoginModal v-model:show="showLoginModal" :provider="loginTarget" @changed="onLoginChanged" />
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, h } from 'vue'
+import { ref, computed, onMounted, h } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { NIcon, NButton, NSpin, NEmpty, NSpace } from 'naive-ui'
+import { NIcon, NButton, NSpin, NEmpty, NSpace, createDiscreteApi } from 'naive-ui'
 import {
   Play,
   Shuffle,
@@ -97,8 +104,11 @@ import {
 } from '@vicons/ionicons5'
 import type { DataTableColumns } from 'naive-ui'
 import { usePlayerStore } from '@/stores/player'
+import LoginModal from '@/components/LoginModal.vue'
 import {
   getPlaylistDetail,
+  likeTrack,
+  isTauri,
   type Track as ApiTrack,
   type MusicSource,
 } from '@/api'
@@ -106,6 +116,34 @@ import {
 const router = useRouter()
 const route = useRoute()
 const player = usePlayerStore()
+
+/** 全局消息提示 */
+const { message } = createDiscreteApi(['message'])
+
+/** 当前详情页的播放源（默认从 query 读取） */
+const detailSource = ref<MusicSource>((route.query.source as MusicSource) || 'netease')
+
+/* ---------- 登录引导 ---------- */
+
+const showLoginModal = ref(false)
+const needLogin = ref(false)
+
+const loginTarget = computed(() => ({
+  key: detailSource.value,
+  label: detailSource.value === 'qq_music' ? 'QQ 音乐' : '网易云音乐',
+}))
+
+const sourceLabel = computed(() => loginTarget.value.label)
+
+function openLogin() {
+  showLoginModal.value = true
+}
+
+function onLoginChanged() {
+  // 登录成功后重新加载歌单详情
+  showLoginModal.value = false
+  loadDetail()
+}
 
 interface Track {
   id: string
@@ -248,8 +286,22 @@ const columns: DataTableColumns<Track> = [
   },
 ]
 
-function toggleLike(track: Track) {
-  track.isLiked = !track.isLiked
+async function toggleLike(track: Track) {
+  const target = !track.isLiked
+  track.isLiked = target
+  // 浏览器环境直接模拟成功
+  if (!isTauri) {
+    message.success(target ? '已收藏（演示）' : '已取消收藏（演示）')
+    return
+  }
+  try {
+    await likeTrack(track.source, track.id, target)
+    message.success(target ? '已收藏到默认喜欢歌单' : '已取消收藏')
+  } catch (e) {
+    // 失败回滚
+    track.isLiked = !target
+    message.error(`收藏失败：${String(e)}`)
+  }
 }
 
 function playSingle(track: Track) {
@@ -276,11 +328,13 @@ function shufflePlay() {
   router.push({ name: 'Player' })
 }
 
-onMounted(async () => {
+async function loadDetail() {
   const playlistId = String(route.params.id)
   const source = (route.query.source as MusicSource) || 'netease'
+  detailSource.value = source
   loading.value = true
   errorMsg.value = ''
+  needLogin.value = false
   try {
     const detail = await getPlaylistDetail(source, playlistId)
     playlist.value = {
@@ -301,12 +355,17 @@ onMounted(async () => {
       })),
     }
   } catch (e) {
-    errorMsg.value = String(e)
+    const err = String(e)
+    errorMsg.value = err
     playlist.value = null
+    // QQ 歌单详情接口要求登录，识别并引导
+    needLogin.value = source === 'qq_music' && err.includes('登录')
   } finally {
     loading.value = false
   }
-})
+}
+
+onMounted(loadDetail)
 </script>
 
 <style scoped>

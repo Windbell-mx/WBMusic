@@ -31,3 +31,6 @@ frontend/src-tauri/gen
 .vscode/*
 !.vscode/extensions.json
 
+
+test_qq*.py
+run_out.txt

@@ -8,6 +8,7 @@
 
 pub mod music_provider;
 pub mod netease;
+pub mod qq_enc;
 pub mod qq_music;
 pub mod session;
 

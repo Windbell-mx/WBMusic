@@ -73,6 +73,9 @@ pub fn run() {
       commands::get_lyrics,
       commands::get_user_playlists,
       commands::get_playlist_detail,
+      commands::get_recommended_playlists,
+      commands::get_category_playlists,
+      commands::like_track,
       commands::get_cache_dir,
       commands::open_qr_login,
     ])

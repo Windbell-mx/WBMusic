@@ -129,4 +129,13 @@ pub trait MusicProvider: Send + Sync {
 
     /// 获取歌单详情（含歌曲列表）
     async fn get_playlist_detail(&self, playlist_id: &str) -> Result<PlaylistDetail, String>;
+
+    /// 获取推荐歌单（热门/精品歌单，匿名可用，无需登录）
+    async fn get_recommended_playlists(&self, limit: u32) -> Result<Vec<Playlist>, String>;
+
+    /// 获取首页分类歌单（每日推荐/精选/热歌榜等，按平台实现各自支持的分类）
+    async fn get_category_playlists(&self, category: &str, limit: u32) -> Result<Vec<Playlist>, String>;
+
+    /// 收藏/取消收藏歌曲（红心）。`like=true` 收藏到平台默认喜欢歌单，`false` 取消
+    async fn like_track(&self, track_id: &str, like: bool) -> Result<(), String>;
 }
