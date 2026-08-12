@@ -69,6 +69,7 @@ pub fn run() {
       commands::login_music,
       commands::logout_music,
       commands::get_login_status,
+      commands::refresh_all,
       commands::get_track_url,
       commands::get_lyrics,
       commands::get_user_playlists,

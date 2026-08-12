@@ -194,6 +194,40 @@ mod tests {
         let del_plain = tokio::task::spawn_blocking(move || qq_enc::decrypt(&del_bytes)).await.unwrap();
         println!("Del解密结果: {:?}", del_plain);
     }
+
+    /// 验证个性化推荐歌单：登录态应返回「今日私享」等歌单；未登录回退热门
+    #[tokio::test]
+    async fn personal_recommend_works() {
+        let cred = match std::env::var("QQ_TEST_CREDENTIAL") {
+            Ok(c) if !c.is_empty() => c,
+            _ => {
+                eprintln!("跳过：未设置 QQ_TEST_CREDENTIAL（格式 uin=xxx; qm_keyst=xxx）");
+                return;
+            }
+        };
+        let p = QqMusicProvider::new(ProviderSession {
+            logged_in: true,
+            nickname: None,
+            user_id: None,
+            credential: Some(cred.clone()),
+        });
+        let list = p
+            .fetch_personal_recommended_playlists(10)
+            .await
+            .expect("获取个性化推荐失败");
+        assert!(!list.is_empty(), "推荐歌单不应为空");
+        for pl in &list {
+            println!("  {} (id={})", pl.name, pl.id);
+            assert!(!pl.id.is_empty(), "歌单 id 不应为空");
+        }
+        // 登录态应包含「今日私享」或至少能解析出多个歌单
+        assert!(list.len() >= 3, "歌单数量应>=3, 实际 {}", list.len());
+        assert!(
+            list.iter().any(|p| p.name.contains("今日私享") || p.name.contains("私享")),
+            "应包含今日私享类个性化歌单, 实际: {:?}",
+            list.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
+        );
+    }
 }
 
 /// QQ 音乐 API 基础地址
@@ -318,6 +352,8 @@ impl QqMusicProvider {
     ///
     /// 用户创建的歌单：fcg_user_created_diss（需登录态，否则只返回目录）
     /// 用户收藏的歌单：fcg_get_profile_order_asset (reqtype=3)
+    /// 注意："我喜欢"歌单（dirid=201）在登录态下由 fcg_user_created_diss 返回，
+    /// 无需单独请求；若未登录或登录过期则不会出现，重新登录即可恢复。
     async fn fetch_user_playlists(&self) -> Result<Vec<Playlist>, String> {
         // 必须已登录（解析到 uin + key）才可能拿到歌单
         let (uin, key) = self.session_cred()?;
@@ -354,6 +390,10 @@ impl QqMusicProvider {
                         .to_string();
                     // 跳过无 ID 的系统目录（如 QZone背景音乐/本地上传，tid=0）
                     if id == "0" {
+                        continue;
+                    }
+                    // 去重（收藏列表可能包含自己创建的）
+                    if playlists.iter().any(|p| p.id == id) {
                         continue;
                     }
                     playlists.push(Playlist {
@@ -422,11 +462,16 @@ impl QqMusicProvider {
     ///   旧版 skey/p_skey cookie，导致该接口无论是否登录都返回 `check privacy error`，
     ///   前端误判为"需要登录"。
     /// - 新接口匿名即可返回完整歌单信息与歌曲列表，无需登录。
+    /// - 特例：dirid=201"我喜欢"歌单必须带 `dirid` 参数 + 登录态（authst/uin），
+    ///   否则返回空壳（dirinfo 全空、songlist=0）。
     async fn fetch_playlist_detail(&self, playlist_id: &str) -> Result<PlaylistDetail, String> {
         // 排行榜详情（id 格式 qq:toplist:<topid>）
         if let Some(topid) = playlist_id.strip_prefix("qq:toplist:") {
             return self.fetch_toplist_detail(topid).await;
         }
+        // "我喜欢"歌单（dirid=201）：comm 带登录态，param 必须加 dirid
+        let is_liked = playlist_id == "201";
+        let (session_uin, session_key) = self.session_cred()?;
         let mut headers = HeaderMap::new();
         headers.insert(
             "Referer",
@@ -442,8 +487,18 @@ impl QqMusicProvider {
         let mut begin: i64 = 0;
         const PAGE: i64 = 200;
         loop {
-            let body = json!({
-                "comm": {
+            // 常规歌单用匿名 comm；"我喜欢"歌单用登录态 comm（uin + authst）
+            let comm = if is_liked {
+                json!({
+                    "uin": session_uin.parse::<i64>().unwrap_or(0),
+                    "ct": "20",
+                    "cv": "13020508",
+                    "tmeAppID": "qqmusic",
+                    "format": "json",
+                    "authst": session_key,
+                })
+            } else {
+                json!({
                     "cv": 13020508,
                     "ct": 24,
                     "format": "json",
@@ -454,18 +509,27 @@ impl QqMusicProvider {
                     "needNewCode": 1,
                     "uin": "0",
                     "g_tk": 5381,
-                },
+                })
+            };
+            let mut param = json!({
+                "disstid": playlist_id.parse::<i64>().unwrap_or(0),
+                "enc_host_uin": if is_liked { session_uin.as_str() } else { "" },
+                "tag": 1,
+                "userinfo": 1,
+                "song_begin": begin,
+                "song_num": PAGE,
+            });
+            // 关键："我喜欢"歌单必须同时带 dirid=201，否则返回空壳
+            if is_liked {
+                param["dirid"] = json!(201);
+                param["cmd"] = json!(127);
+            }
+            let body = json!({
+                "comm": comm,
                 "req_0": {
                     "module": "music.srfDissInfo.aiDissInfo",
                     "method": "uniform_get_Dissinfo",
-                    "param": {
-                        "disstid": playlist_id.parse::<i64>().unwrap_or(0),
-                        "enc_host_uin": "",
-                        "tag": 1,
-                        "userinfo": 1,
-                        "song_begin": begin,
-                        "song_num": PAGE,
-                    },
+                    "param": param,
                 },
             });
             let resp = self
@@ -765,6 +829,99 @@ impl QqMusicProvider {
         self.fetch_playlists_by_sort(5, limit).await
     }
 
+    /// 获取基于登录账号的个性化推荐歌单
+    ///
+    /// 数据源：PC/Mac 客户端首页 `https://c.y.qq.com/node/musicmac/v6/index.html`，
+    /// 带登录 Cookie 请求时页面会渲染「今日私享」等基于用户听歌口味生成的推荐歌单
+    /// （匿名访问则只有通用编辑歌单，没有今日私享）。因此：
+    /// - 已登录：抓取该页面并解析歌单列表（今日私享排第一）
+    /// - 未登录：回退到热门歌单（`sortId=5` 按播放量），保证功能可用
+    async fn fetch_personal_recommended_playlists(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<Playlist>, String> {
+        let limit = limit.clamp(1, 30);
+        // 未登录：回退热门歌单（匿名接口，通用内容）
+        let (_, key) = self.session_cred()?;
+        if key.is_empty() {
+            return self.fetch_playlists_by_sort(5, limit).await;
+        }
+        let headers = match self.cookie_headers() {
+            Ok(h) => h,
+            Err(_) => return self.fetch_playlists_by_sort(5, limit).await,
+        };
+        let resp = self
+            .client
+            .get("https://c.y.qq.com/node/musicmac/v6/index.html")
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| format!("获取个性化推荐失败: {}", e))?;
+        if !resp.status().is_success() {
+            return self.fetch_playlists_by_sort(5, limit).await;
+        }
+        let html = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取推荐页面失败: {}", e))?;
+        let mut result: Vec<Playlist> = Vec::new();
+        // 逐项解析 `<li class="playlist__item ...">...</li>`，只取歌单（data-type="10014"）
+        for li in html.split("<li class=\"playlist__item") {
+            if !li.contains("data-type=\"10014\"") {
+                continue;
+            }
+            // id：data-rid="<数字>"
+            let id = match extract_attr(li, "data-rid=\"") {
+                Some(v) => v,
+                None => continue,
+            };
+            // 名称：<h3 class="playlist__name"><a ...>名称</a></h3>
+            let name = match li.find("playlist__name") {
+                Some(idx) => {
+                    let after = &li[idx..];
+                    // 跳过 `<h3 ...>` 与 `<a ...>` 到第一个 `>`，再取到 `<` 为止
+                    match after.find('>') {
+                        Some(g) => {
+                            let seg = &after[g + 1..];
+                            match seg.find('>') {
+                                Some(g2) => {
+                                    let txt = &seg[g2 + 1..];
+                                    let end = txt.find('<').unwrap_or(txt.len());
+                                    txt[..end].trim().to_string()
+                                }
+                                None => String::new(),
+                            }
+                        }
+                        None => String::new(),
+                    }
+                }
+                None => String::new(),
+            };
+            if name.is_empty() {
+                continue;
+            }
+            // 封面：<img class="playlist__pic" src="...">
+            let cover_url = extract_attr(li, "playlist__pic\" src=\"")
+                .or_else(|| extract_attr(li, "src=\""));
+            let cover_url = cover_url.map(|s| s.replace("http://", "https://"));
+            result.push(Playlist {
+                id,
+                name,
+                description: None,
+                cover_url,
+                track_count: 0,
+                play_count: 0,
+                source: MusicProviderKind::QqMusic,
+            });
+        }
+        if result.is_empty() {
+            // 解析失败（页面结构变化等）时回退热门歌单
+            return self.fetch_playlists_by_sort(5, limit).await;
+        }
+        result.truncate(limit as usize);
+        Ok(result)
+    }
+
     /// 通过歌单广场接口按指定排序方式获取歌单（匿名可用，无需登录）
     ///
     /// - `sortId=5`：按播放量排序（热门）
@@ -837,11 +994,11 @@ impl QqMusicProvider {
 
     /// 获取首页分类歌单
     ///
-    /// - `rec`：推荐歌单（编辑推荐排序）
+    /// - `rec`：个性化推荐（已登录时基于账号口味的「今日私享」等，未登录回退热门）
     /// - `hot`：排行榜（官方榜单）
     async fn fetch_category_playlists(&self, category: &str, limit: u32) -> Result<Vec<Playlist>, String> {
         match category {
-            "rec" => self.fetch_playlists_by_sort(1, limit).await,
+            "rec" => self.fetch_personal_recommended_playlists(limit).await,
             "hot" => self.fetch_hot_charts(limit).await,
             _ => Err(format!("不支持的分类: {}", category)),
         }
@@ -952,6 +1109,81 @@ impl MusicProvider for QqMusicProvider {
             logged_in: guard.logged_in,
             nickname: guard.nickname.clone(),
             user_id: guard.user_id.clone(),
+        }
+    }
+
+    /// 校验登录态是否有效
+    ///
+    /// 本地：解析 Cookie 中的 `psrf_access_token_expiresAt` 时间戳，若已过期则失效；
+    /// 网络：调用 `fcg_get_profile_order_asset`（收藏歌单接口），该接口真正校验
+    /// `qm_keyst`——有效返回 code=0，会话 key 失效返回 code=4000。
+    /// 网络请求失败时保守视为有效（避免误登出）。
+    async fn validate_login(&self) -> Result<bool, String> {
+        let (cookie, logged_in) = {
+            let guard = self
+                .session
+                .lock()
+                .map_err(|_| "会话锁获取失败".to_string())?;
+            (guard.credential.clone(), guard.logged_in)
+        };
+        if !logged_in {
+            return Ok(false);
+        }
+        let Some(cookie) = cookie else {
+            return Ok(false);
+        };
+        // 本地时间戳校验：psrf_access_token_expiresAt（Unix 秒）
+        let mut has_expiry = false;
+        let mut expired = false;
+        for part in cookie.split(';') {
+            let part = part.trim();
+            if let Some((k, v)) = part.split_once('=') {
+                if k.trim() == "psrf_access_token_expiresAt" {
+                    if let Ok(exp) = v.trim().parse::<i64>() {
+                        has_expiry = true;
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        if now >= exp {
+                            expired = true;
+                        }
+                    }
+                }
+            }
+        }
+        if has_expiry && expired {
+            return Ok(false);
+        }
+        // 网络校验：fcg_get_profile_order_asset 返回 code=4000 表示 qm_keyst 已失效
+        // （qm_keyst 可能在 access token 到期前就被服务端作废，本地时间戳检测不到）
+        let (uin, key) = match self.session_cred() {
+            Ok(v) => v,
+            Err(_) => return Ok(false),
+        };
+        if key.is_empty() {
+            return Ok(false);
+        }
+        let headers = match self.cookie_headers() {
+            Ok(h) => h,
+            Err(_) => return Ok(false),
+        };
+        let url = format!(
+            "https://c.y.qq.com/fav/fcgi-bin/fcg_get_profile_order_asset.fcg?ct=20&cid=205360956&userid={}&reqtype=3&sin=0&ein=100&format=json&g_tk=5381&loginUin=0&hostUin=0&platform=yqq.json&needNewCode=0",
+            uin
+        );
+        match self.client.get(&url).headers(headers).send().await {
+            Ok(resp) => {
+                if let Ok(j) = resp.json::<Value>().await {
+                    if j["code"].as_i64() == Some(4000) {
+                        log::info!("QQ 音乐登录态校验失败：qm_keyst 已失效 (code=4000)");
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            // 网络错误/超时：保守视为有效，避免断网时误登出
+            Err(_) => Ok(true),
         }
     }
 
@@ -1222,5 +1454,19 @@ impl MusicProvider for QqMusicProvider {
             ));
         }
         Ok(())
+    }
+}
+
+/// 从 HTML 片段中提取第一个 `prefix` 之后的引号属性值
+/// （如 `extract_attr(li, "data-rid=\"")` 取 `data-rid="..."` 的数值）
+fn extract_attr(haystack: &str, prefix: &str) -> Option<String> {
+    let idx = haystack.find(prefix)?;
+    let rest = &haystack[idx + prefix.len()..];
+    let end = rest.find('"')?;
+    let val = rest[..end].trim();
+    if val.is_empty() {
+        None
+    } else {
+        Some(val.to_string())
     }
 }

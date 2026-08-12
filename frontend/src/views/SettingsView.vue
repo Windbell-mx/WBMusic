@@ -174,7 +174,7 @@
               <n-avatar round size="medium" class="about-logo">W</n-avatar>
               <div class="about-info">
                 <span class="about-name">WBMusic</span>
-                <n-text depth="3" style="font-size: 12px">v0.1.3 · 音乐播放器应用</n-text>
+                <n-text depth="3" style="font-size: 12px">v0.1.4 · 音乐播放器应用</n-text>
               </div>
             </div>
           </n-card>
@@ -282,7 +282,7 @@ function clearCache() {
 }
 
 function checkUpdate() {
-  message.info('当前已是最新版本 v0.1.3')
+  message.info('当前已是最新版本 v0.1.4')
 }
 
 const showCachePathModal = ref(false)
@@ -465,7 +465,7 @@ function saveCachePath() {
 }
 
 .about-logo {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: var(--accent);
   color: #fff;
   font-weight: 700;
 }

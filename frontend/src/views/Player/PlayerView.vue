@@ -71,18 +71,27 @@
 
       <!-- 右侧：歌词 -->
       <section v-if="appStore.showLyrics" class="lyric-section">
-        <div class="lyric-window" ref="lyricWindowEl">
-          <div v-if="lyrics.length" class="lyric-list" :style="{ transform: lyricOffset }">
+        <div class="lyric-window" ref="lyricWindowEl" @wheel.prevent="onLyricWheel">
+          <div v-if="lyrics.length" class="lyric-list" :class="{ manual: isManualScroll }" :style="{ transform: lyricOffset }">
             <div
               v-for="(line, i) in lyrics"
               :key="i"
               class="lyric-line"
               :class="{ active: i === activeLyricIndex }"
+              @click="onLyricClick(line)"
             >
               {{ line.text }}
             </div>
           </div>
           <div v-else class="lyric-empty">暂无歌词</div>
+
+          <!-- 手动浏览时：回到当前播放位置 -->
+          <transition name="fade">
+            <button v-if="isManualScroll" class="lyric-back-btn" @click="backToPlaying">
+              <n-icon :component="MusicalNotes" size="14" />
+              回到当前播放
+            </button>
+          </transition>
         </div>
       </section>
     </main>
@@ -97,7 +106,7 @@
           class="progress-slider"
           :format-tooltip="formatTooltip"
           :rail-style="{ backgroundColor: 'rgba(255,255,255,0.15)' }"
-          :thumb-style="{ backgroundColor: '#667eea' }"
+          :thumb-style="{ backgroundColor: appStore.themeColor }"
           @update:value="onProgressChange"
         />
         <n-button text class="ctrl-btn like-btn" @click="toggleLike">
@@ -122,7 +131,7 @@
             :step="0.01"
             class="volume-slider"
             :rail-style="{ backgroundColor: 'rgba(255,255,255,0.15)' }"
-            :thumb-style="{ backgroundColor: '#667eea' }"
+            :thumb-style="{ backgroundColor: appStore.themeColor }"
             @update:value="onVolumeChange"
           />
           <n-icon :component="VolumeHigh" class="vol-icon" size="18" />
@@ -244,6 +253,10 @@ async function loadLyrics() {
   const seq = ++lyricReqSeq
   // 切换到新曲目先清空歌词，避免上一首的歌词残留滚动
   lyrics.value = []
+  // 重置手动浏览状态
+  clearTimeout(manualScrollTimer)
+  isManualScroll.value = false
+  manualOffset.value = 0
   if (!currentTrack.value) return
   try {
     const text = await getLyrics(currentTrack.value.source, currentTrack.value.id)
@@ -287,9 +300,57 @@ const activeLyricIndex = computed(() => {
 // 歌词列表位移：让高亮行始终保持在歌词窗口中央
 // 窗口高 H，行高 44px → 高亮行中心应位于 H/2，列表位移 = H/2 - 行高/2 - 当前行号*44
 const lyricOffset = computed(() => {
+  if (isManualScroll.value) {
+    return `translateY(${manualOffset.value}px)`
+  }
   const offset = lyricWindowH.value / 2 - 22
   return `translateY(${offset - activeLyricIndex.value * 44}px)`
 })
+
+// ---- 歌词手动浏览：滚轮滚动 + 点击跳转 ----
+// 手动滚动偏移（px），进入手动模式后不再跟随播放自动滚动
+const manualOffset = ref(0)
+// 是否处于手动浏览模式（滚轮滚动后进入；点击歌词跳转或"回到当前"退出）
+const isManualScroll = ref(false)
+
+// 歌词行高（与 CSS .lyric-line 保持一致）
+const LYRIC_LINE_H = 44
+
+// 停止滚动后自动跳回播放位置的延迟（毫秒）
+const MANUAL_SCROLL_IDLE_MS = 3000
+let manualScrollTimer: number | undefined
+
+function onLyricWheel(e: WheelEvent) {
+  if (lyrics.value.length === 0) return
+  // 首次滚动：以当前高亮行位置为起点进入手动模式
+  if (!isManualScroll.value) {
+    manualOffset.value = lyricWindowH.value / 2 - LYRIC_LINE_H / 2 - activeLyricIndex.value * LYRIC_LINE_H
+    isManualScroll.value = true
+  }
+  // 向下滚动（deltaY>0）→ 列表上移，浏览后续歌词
+  manualOffset.value -= e.deltaY
+  // 边界限制：第一行居中（最大值）与最后一行居中（最小值）之间
+  const maxOffset = lyricWindowH.value / 2 - LYRIC_LINE_H / 2
+  const minOffset = maxOffset - (lyrics.value.length - 1) * LYRIC_LINE_H
+  manualOffset.value = Math.min(maxOffset, Math.max(minOffset, manualOffset.value))
+
+  // 重置闲置计时：停止滚动一段时间后自动跳回当前播放位置
+  clearTimeout(manualScrollTimer)
+  manualScrollTimer = window.setTimeout(backToPlaying, MANUAL_SCROLL_IDLE_MS)
+}
+
+/** 点击歌词行：跳转到该行时间点播放，并恢复自动跟随 */
+function onLyricClick(line: { time: number; text: string }) {
+  player.seekTo(line.time)
+  clearTimeout(manualScrollTimer)
+  isManualScroll.value = false
+}
+
+/** 退出手动浏览，恢复跟随当前播放位置 */
+function backToPlaying() {
+  clearTimeout(manualScrollTimer)
+  isManualScroll.value = false
+}
 
 function goBack() {
   router.back()
@@ -342,6 +403,16 @@ watch(
   },
 )
 
+// 暂停/停止播放时自动退出手动浏览，歌词跳回当前播放位置
+watch(
+  () => player.isPlaying,
+  (playing) => {
+    if (!playing) {
+      isManualScroll.value = false
+    }
+  },
+)
+
 onMounted(() => {
   // 测量歌词窗口实际高度（受窗口大小影响），用于高亮行居中
   requestAnimationFrame(updateLyricWindowH)
@@ -372,6 +443,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', updateLyricWindowH)
+  clearTimeout(manualScrollTimer)
   // 不暂停播放：返回时底部 PlayerBar 继续播放
 })
 </script>
@@ -384,6 +456,8 @@ onBeforeUnmount(() => {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  /* 顶部为透明标题栏（36px）留出空间，背景渐变铺满整个窗口 */
+  padding-top: 36px;
   background: linear-gradient(135deg, #1a1a2e 0%, #16213e 55%, #0f3460 100%);
   color: #fff;
 }
@@ -400,7 +474,7 @@ onBeforeUnmount(() => {
 .glow-1 {
   width: 480px;
   height: 480px;
-  background: radial-gradient(circle, rgba(102, 126, 234, 0.9), transparent 70%);
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 90%, transparent), transparent 70%);
   top: -140px;
   right: -100px;
 }
@@ -700,6 +774,11 @@ onBeforeUnmount(() => {
   transition: transform 0.5s ease;
 }
 
+/* 手动浏览模式：滚轮直接控制位移，无需平滑过渡动画 */
+.lyric-list.manual {
+  transition: none;
+}
+
 .lyric-line {
   height: 44px;
   line-height: 44px;
@@ -708,13 +787,60 @@ onBeforeUnmount(() => {
   color: rgba(255, 255, 255, 0.35);
   white-space: nowrap;
   transition: color 0.4s ease, font-size 0.4s ease;
+  cursor: pointer;
+  padding: 0 8px;
+  border-radius: 6px;
+}
+
+.lyric-line:hover {
+  color: rgba(255, 255, 255, 0.75);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .lyric-line.active {
   color: #fff;
   font-size: 19px;
   font-weight: 600;
-  text-shadow: 0 0 20px rgba(102, 126, 234, 0.8);
+  text-shadow: 0 0 20px color-mix(in srgb, var(--accent) 80%, transparent);
+}
+
+.lyric-line.active:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* 手动浏览时"回到当前播放"按钮 */
+.lyric-back-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition: background 0.2s;
+  z-index: 5;
+}
+
+.lyric-back-btn:hover {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
 }
 
 .lyric-empty {
@@ -776,7 +902,7 @@ onBeforeUnmount(() => {
 }
 
 .mode-btn {
-  color: #667eea;
+  color: var(--accent-light);
   transition: color 0.2s, transform 0.2s;
   position: relative;
 }
@@ -802,7 +928,7 @@ onBeforeUnmount(() => {
   right: -8px;
   font-size: 10px;
   font-weight: 700;
-  color: #667eea;
+  color: var(--accent-light);
   background: rgba(22, 33, 62, 0.9);
   border-radius: 50%;
   padding: 0 4px;
@@ -820,15 +946,19 @@ onBeforeUnmount(() => {
 }
 
 .play-btn {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
-  border: none !important;
-  box-shadow: 0 6px 24px rgba(102, 126, 234, 0.5);
+  /* 透明毛玻璃：无底色 + 模糊 + 主题色描边（播放页深色背景上图标保持白色） */
+  background: rgba(255, 255, 255, 0.08) !important;
+  border: 1px solid color-mix(in srgb, var(--accent-light) 45%, transparent) !important;
+  backdrop-filter: blur(16px) saturate(1.6);
+  -webkit-backdrop-filter: blur(16px) saturate(1.6);
+  color: #fff !important;
+  box-shadow: 0 6px 24px color-mix(in srgb, var(--accent) 30%, transparent);
   transition: transform 0.2s, box-shadow 0.2s;
 }
 
 .play-btn:hover {
   transform: scale(1.08);
-  box-shadow: 0 10px 32px rgba(102, 126, 234, 0.65);
+  box-shadow: 0 10px 32px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 /* 控制区：音量 | 播放控制 | 下载/分享 单行平齐 */

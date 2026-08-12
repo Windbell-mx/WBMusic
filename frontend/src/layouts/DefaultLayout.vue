@@ -1,5 +1,6 @@
 ﻿<template>
-  <n-layout has-sider style="height: 100vh">
+  <!-- 标题栏高度 36px，布局从其下方开始 -->
+  <n-layout has-sider style="height: calc(100vh - 36px); margin-top: 36px">
     <!-- 侧边栏导航 -->
     <n-layout-sider
       bordered
@@ -8,7 +9,7 @@
       :width="220"
       collapse-mode="width"
       show-trigger="bar"
-      style="background: var(--n-sidebar-color)"
+      class="sidebar-glass"
     >
       <n-layout-header class="sidebar-header" @click="handleLogoClick">
         <transition name="fade" mode="out-in">
@@ -67,7 +68,7 @@
       >
         <!-- 内容区：最大化窗口下充分利用宽度（首页内部自适应两栏） -->
         <div class="page-container">
-          <router-view />
+          <router-view :key="appStore.refreshKey" />
         </div>
       </n-layout-content>
 
@@ -78,7 +79,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, onMounted, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   NLayout,
@@ -92,7 +93,7 @@ import { Home, List, Search, Settings, MusicalNote, MusicalNotes } from '@vicons
 import PlayerBar from '@/components/Player/PlayerBar.vue'
 import LoginModal from '@/components/LoginModal.vue'
 import { useAppStore } from '@/stores/app'
-import { getLoginStatus, type MusicSource } from '@/api'
+import { getLoginStatus, refreshAll, type MusicSource } from '@/api'
 
 const router = useRouter()
 const route = useRoute()
@@ -115,7 +116,24 @@ async function refreshProviderStatus() {
   }
 }
 
-onMounted(refreshProviderStatus)
+onMounted(async () => {
+  // 启动时同步校验登录态：后端会验证 qm_keyst 等会话凭据是否仍有效，
+  // 失效的自动登出（清凭据 + session），避免"显示已登录但实际已过期"。
+  // 校验完再用最新状态渲染侧边栏。
+  try {
+    const statuses = await refreshAll()
+    qqLoggedIn.value = statuses.qq_music?.logged_in ?? false
+    neteaseLoggedIn.value = statuses.netease?.logged_in ?? false
+  } catch {
+    await refreshProviderStatus()
+  }
+})
+
+// 全局刷新（F5/刷新按钮）后重新同步侧边栏登录状态
+watch(
+  () => appStore.refreshKey,
+  () => refreshProviderStatus(),
+)
 
 // 登录弹窗
 const showLoginModal = ref(false)
@@ -161,6 +179,21 @@ function handleLogoClick() {
 </script>
 
 <style scoped>
+/* ---------- 侧边栏毛玻璃（透明） ---------- */
+.sidebar-glass {
+  /* 透明毛玻璃：背景完全透明，只保留模糊 */
+  background: transparent !important;
+  backdrop-filter: blur(24px) saturate(1.8);
+  -webkit-backdrop-filter: blur(24px) saturate(1.8);
+  box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.08);
+}
+
+html.dark .sidebar-glass {
+  /* 暗色：完全透明 + 淡紫右描边 */
+  background: transparent !important;
+  box-shadow: inset -1px 0 0 color-mix(in srgb, var(--accent-light) 35%, transparent);
+}
+
 /* ---------- 主内容区 ---------- */
 .page-container {
   max-width: 1800px;
@@ -184,10 +217,7 @@ function handleLogoClick() {
   white-space: nowrap;
   font-weight: 700;
   font-size: 20px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+  color: var(--accent);
 }
 
 /* 收起时的页签徽章 */
@@ -196,7 +226,7 @@ function handleLogoClick() {
   height: 38px;
   flex-shrink: 0;
   border-radius: 12px 12px 12px 4px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: var(--accent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -204,13 +234,13 @@ function handleLogoClick() {
   font-size: 18px;
   font-weight: 800;
   letter-spacing: 0.5px;
-  box-shadow: 0 4px 14px rgba(102, 126, 234, 0.45);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 45%, transparent);
   transition: transform 0.2s, box-shadow 0.2s;
 }
 
 .logo-tab:hover {
   transform: scale(1.06);
-  box-shadow: 0 6px 18px rgba(102, 126, 234, 0.55);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 /* 文字/徽章切换过渡 */
@@ -278,12 +308,12 @@ function handleLogoClick() {
 
 /* QQ音乐：品牌绿 */
 .tp-card.qq .tp-icon {
-  background: linear-gradient(135deg, #31c27c 0%, #1fa96b 100%);
+  background: #31c27c;
 }
 
 /* 网易云：品牌红 */
 .tp-card.netease .tp-icon {
-  background: linear-gradient(135deg, #d43c33 0%, #b0322a 100%);
+  background: #d43c33;
 }
 
 .tp-info {
@@ -312,6 +342,6 @@ function handleLogoClick() {
 
 .tp-badge.on {
   color: #fff;
-  background: linear-gradient(135deg, #31c27c 0%, #1fa96b 100%);
+  background: #31c27c;
 }
 </style>

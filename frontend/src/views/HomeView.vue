@@ -11,7 +11,7 @@
           </p>
         </div>
 
-        <!-- 推荐歌单（匿名可用） -->
+        <!-- 推荐歌单（QQ 音乐登录后为个性化推荐，未登录回退热门） -->
         <section class="recommend-section">
           <div class="recommend-head">
             <h2 class="recommend-title">发现音乐</h2>
@@ -228,11 +228,11 @@ const platformTabs: PlatformTab[] = [
 const platformCategories: Record<MusicSource, CategoryTab[]> = {
   netease: [
     { key: 'daily', label: '每日推荐' },
-    { key: 'featured', label: '精选' },
+    { key: 'featured', label: '为你推荐' },
     { key: 'hot', label: '热歌榜' },
   ],
   qq_music: [
-    { key: 'rec', label: '推荐' },
+    { key: 'rec', label: '为你推荐' },
     { key: 'hot', label: '排行榜' },
   ],
 }
@@ -390,10 +390,7 @@ function goSettings() {
   margin: 0 0 8px;
   font-size: 32px;
   font-weight: 800;
-  background: linear-gradient(120deg, #667eea 0%, #764ba2 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+  color: var(--accent);
 }
 
 .welcome-sub {
@@ -412,7 +409,7 @@ function goSettings() {
 }
 
 .guide-icon {
-  color: #667eea;
+  color: var(--accent);
   margin-bottom: 16px;
 }
 
@@ -540,9 +537,27 @@ function goSettings() {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 3px;
+  padding: 4px;
   border-radius: 999px;
-  background: var(--n-color-2);
+  /* 浅色玻璃：纯白半透明底 + 顶部高光 + 柔和投影，仍通透 */
+  background: rgba(255, 255, 255, 0.45);
+  backdrop-filter: blur(16px) saturate(1.8);
+  -webkit-backdrop-filter: blur(16px) saturate(1.8);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  box-shadow:
+    0 6px 20px rgba(31, 38, 135, 0.1),
+    0 2px 6px rgba(0, 0, 0, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.25);
+}
+
+html.dark .recommend-tabs {
+  /* 暗色无底色：仅保留模糊玻璃感 + 细边框，完全透出底下内容 */
+  background: transparent;
+  backdrop-filter: blur(16px) saturate(1.8);
+  -webkit-backdrop-filter: blur(16px) saturate(1.8);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 .recommend-tab {
@@ -553,17 +568,37 @@ function goSettings() {
   cursor: pointer;
   user-select: none;
   color: var(--n-text-color-3);
-  transition: color 0.2s, background 0.2s;
+  transition: color 0.2s, background 0.2s, box-shadow 0.2s;
 }
 
 .recommend-tab:hover {
   color: var(--n-text-color);
+  background: rgba(255, 255, 255, 0.55);
+}
+
+html.dark .recommend-tab:hover {
+  background: transparent;
 }
 
 .recommend-tab.active {
-  color: #fff;
-  background: linear-gradient(120deg, #667eea 0%, #764ba2 100%);
+  color: var(--accent);
+  /* 激活态：透明毛玻璃胶囊（透出底下 + 模糊），主题色 + 高光 */
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(12px) saturate(1.6);
+  -webkit-backdrop-filter: blur(12px) saturate(1.6);
+  box-shadow:
+    0 2px 8px rgba(31, 38, 135, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
   font-weight: 600;
+}
+
+html.dark .recommend-tab.active {
+  /* 暗色激活：完全透明毛玻璃（无底色），主题色文字 + 加粗 + 极淡主题色描边 */
+  color: var(--accent-light);
+  background: transparent;
+  backdrop-filter: blur(12px) saturate(1.6);
+  -webkit-backdrop-filter: blur(12px) saturate(1.6);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-light) 30%, transparent);
 }
 
 /* 二级分类标签 */
@@ -583,8 +618,12 @@ function goSettings() {
   cursor: pointer;
   user-select: none;
   color: var(--n-text-color-3);
-  background: var(--n-color-2);
+  background: rgba(255, 255, 255, 0.35);
   transition: color 0.2s, background 0.2s;
+}
+
+html.dark .category-tab {
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .category-tab:hover {
@@ -592,9 +631,19 @@ function goSettings() {
 }
 
 .category-tab.active {
-  color: #667eea;
-  background: rgba(102, 126, 234, 0.12);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  backdrop-filter: blur(12px) saturate(1.6);
+  -webkit-backdrop-filter: blur(12px) saturate(1.6);
   font-weight: 600;
+}
+
+html.dark .category-tab.active {
+  color: var(--accent-light);
+  background: transparent;
+  backdrop-filter: blur(12px) saturate(1.6);
+  -webkit-backdrop-filter: blur(12px) saturate(1.6);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-light) 30%, transparent);
 }
 
 .recommend-row {

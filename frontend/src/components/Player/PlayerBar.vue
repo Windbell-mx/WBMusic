@@ -88,9 +88,16 @@
 <style scoped>
 .player-bar {
   z-index: 100;
-  background: color-mix(in srgb, var(--n-color) 72%, transparent) !important;
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  /* 透明毛玻璃：背景完全透明，只保留模糊 */
+  background: transparent !important;
+  backdrop-filter: blur(24px) saturate(1.8);
+  -webkit-backdrop-filter: blur(24px) saturate(1.8);
+  box-shadow: 0 -1px 0 rgba(0, 0, 0, 0.08);
+}
+html.dark .player-bar {
+  /* 暗色：完全透明 + 淡紫顶描边 */
+  background: transparent !important;
+  box-shadow: 0 -1px 0 color-mix(in srgb, var(--accent-light) 35%, transparent);
 }
 
 .bar-glow {
@@ -99,13 +106,7 @@
   left: 0;
   right: 0;
   height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(102, 126, 234, 0.55) 30%,
-    rgba(118, 75, 162, 0.55) 70%,
-    transparent
-  );
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .player-grid {
@@ -145,7 +146,7 @@
 
 .track-cover:hover {
   transform: scale(1.04);
-  box-shadow: 0 8px 20px rgba(102, 126, 234, 0.35);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .track-info {
@@ -212,7 +213,7 @@
 
 /* 播放模式按钮：始终高亮，形态区分（参考网易云音乐） */
 .mode-btn {
-  color: #667eea !important;
+  color: var(--accent) !important;
 }
 
 .mode-btn:hover {
@@ -239,7 +240,7 @@
   position: relative;
   font-size: 9px;
   font-weight: 700;
-  color: #667eea;
+  color: var(--accent);
   line-height: 1;
   margin-left: -6px;
   margin-top: -12px;
@@ -249,15 +250,24 @@
 .play-btn {
   width: 42px;
   height: 42px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
-  border: none !important;
-  box-shadow: 0 4px 16px rgba(102, 126, 234, 0.45);
+  /* 透明毛玻璃：无底色 + 模糊 + 紫色描边，图标改紫色（透明底不再用白色） */
+  background: transparent !important;
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent) !important;
+  backdrop-filter: blur(12px) saturate(1.6);
+  -webkit-backdrop-filter: blur(12px) saturate(1.6);
+  color: var(--accent) !important;
+  box-shadow: none;
   transition: transform 0.2s, box-shadow 0.2s;
+}
+
+html.dark .play-btn {
+  border-color: color-mix(in srgb, var(--accent-light) 50%, transparent) !important;
+  color: var(--accent-light) !important;
 }
 
 .play-btn:hover {
   transform: scale(1.06);
-  box-shadow: 0 6px 22px rgba(102, 126, 234, 0.6);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .player-progress {

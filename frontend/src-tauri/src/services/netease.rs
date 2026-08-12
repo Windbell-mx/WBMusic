@@ -442,6 +442,76 @@ impl NeteaseProvider {
         Ok(result)
     }
 
+    /// 获取基于登录账号的个性化推荐歌单
+    ///
+    /// 数据源：`GET /api/discovery/recommend/resource`（需登录 Cookie）。
+    /// 登录后返回「私人雷达」等基于用户听歌口味生成的推荐歌单；
+    /// 匿名访问该接口返回 code=301。因此：
+    /// - 已登录：调用该接口解析推荐歌单
+    /// - 未登录：回退到精品歌单（全站热门，匿名可用），保证功能可用
+    async fn fetch_personal_recommended_playlists(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<Playlist>, String> {
+        let limit = limit.clamp(1, 30);
+        // 未登录：回退精品歌单（匿名接口，通用内容）
+        let logged_in = {
+            let guard = self
+                .session
+                .lock()
+                .map_err(|_| "会话锁获取失败".to_string())?;
+            guard.logged_in && guard.credential.as_deref().map_or(false, |c| !c.is_empty())
+        };
+        if !logged_in {
+            return self.fetch_recommended_playlists(limit).await;
+        }
+        let resp = self
+            .client
+            .get(format!("{}/api/discovery/recommend/resource", API_BASE))
+            .headers(self.cookie_headers()?)
+            .send()
+            .await
+            .map_err(|e| format!("获取个性化推荐失败: {}", e))?;
+        let j: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析个性化推荐失败: {}", e))?;
+        let code = j["code"].as_i64().unwrap_or(-1);
+        if code != 200 {
+            // cookie 失效/过期等：回退精品歌单，保证功能可用
+            return self.fetch_recommended_playlists(limit).await;
+        }
+        let recs = j["recommend"]
+            .as_array()
+            .ok_or("个性化推荐响应格式异常")?;
+        let result: Vec<Playlist> = recs
+            .iter()
+            .filter_map(|p| {
+                let id = p["id"].as_i64()?;
+                let name = p["name"].as_str()?.to_string();
+                Some(Playlist {
+                    id: id.to_string(),
+                    name,
+                    description: p["copywriter"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string()),
+                    cover_url: p["picUrl"].as_str().map(|s| s.to_string()),
+                    track_count: p["trackCount"].as_u64().unwrap_or(0) as u32,
+                    play_count: p["playcount"].as_u64().unwrap_or(0),
+                    source: MusicProviderKind::Netease,
+                })
+            })
+            .collect();
+        if result.is_empty() {
+            // 解析失败（响应结构变化等）：回退精品歌单
+            return self.fetch_recommended_playlists(limit).await;
+        }
+        let mut result = result;
+        result.truncate(limit as usize);
+        Ok(result)
+    }
+
     /// 获取每日推荐歌曲（匿名可用，无需登录）
     ///
     /// 使用 POST `/api/v3/discovery/recommend/songs`，form 为空即可。
@@ -541,13 +611,13 @@ impl NeteaseProvider {
 
     /// 获取首页分类歌单
     ///
-    /// - `featured`：精选（精品歌单）
+    /// - `featured`：为你推荐（登录后为个性化推荐，未登录回退精品歌单）
     /// - `hot`：热歌榜（官方榜单）
     /// - `daily`：每日推荐（特殊卡片，进入详情后返回每日推荐歌曲）
     /// - `mine`：我的歌单（需登录）
     async fn fetch_category_playlists(&self, category: &str, limit: u32) -> Result<Vec<Playlist>, String> {
         match category {
-            "featured" => self.fetch_recommended_playlists(limit).await,
+            "featured" => self.fetch_personal_recommended_playlists(limit).await,
             "hot" => self.fetch_hot_charts(limit).await,
             "daily" => {
                 // 每日推荐包装成一个特殊歌单卡片
@@ -617,6 +687,14 @@ impl MusicProvider for NeteaseProvider {
             logged_in: guard.logged_in,
             nickname: guard.nickname.clone(),
             user_id: guard.user_id.clone(),
+        }
+    }
+
+    /// 校验登录态：直接调用 validate_cookie（请求 /api/nuser/account/get）
+    async fn validate_login(&self) -> Result<bool, String> {
+        match self.validate_cookie(None).await {
+            Ok((_, _)) => Ok(true),
+            Err(_) => Ok(false),
         }
     }
 
@@ -805,5 +883,62 @@ impl MusicProvider for NeteaseProvider {
             return Err(format!("收藏失败 (code={})", code));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 验证个性化推荐歌单：登录态应返回「私人雷达」等歌单；未登录回退精品歌单
+    #[tokio::test]
+    async fn personal_recommend_works() {
+        let cred = match std::env::var("NETEASE_TEST_CREDENTIAL") {
+            Ok(c) if !c.is_empty() => c,
+            _ => {
+                eprintln!("跳过：未设置 NETEASE_TEST_CREDENTIAL（网易云 Cookie）");
+                return;
+            }
+        };
+        let p = NeteaseProvider::new(ProviderSession {
+            logged_in: true,
+            nickname: None,
+            user_id: None,
+            credential: Some(cred),
+        });
+        let list = p
+            .fetch_personal_recommended_playlists(10)
+            .await
+            .expect("获取个性化推荐失败");
+        assert!(!list.is_empty(), "推荐歌单不应为空");
+        for pl in &list {
+            println!("  {} (id={})", pl.name, pl.id);
+            assert!(!pl.id.is_empty(), "歌单 id 不应为空");
+        }
+        // 登录态应包含「私人雷达」或至少能解析出多个歌单
+        assert!(list.len() >= 3, "歌单数量应>=3, 实际 {}", list.len());
+        assert!(
+            list.iter().any(|p| p.name.contains("私人雷达")),
+            "应包含私人雷达个性化歌单, 实际: {:?}",
+            list.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// 验证未登录时回退精品歌单
+    #[tokio::test]
+    async fn personal_recommend_fallback_when_anonymous() {
+        let p = NeteaseProvider::new(ProviderSession {
+            logged_in: false,
+            nickname: None,
+            user_id: None,
+            credential: None,
+        });
+        let list = p
+            .fetch_personal_recommended_playlists(10)
+            .await
+            .expect("未登录回退精品歌单失败");
+        assert!(!list.is_empty(), "精品歌单不应为空");
+        println!("回退精品歌单 {} 个: {:?}", list.len(),
+            list.iter().take(3).map(|p| p.name.as_str()).collect::<Vec<_>>());
     }
 }

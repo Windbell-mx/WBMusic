@@ -28,6 +28,14 @@ export const useAppStore = defineStore('app', () => {
   /** 缓存路径：Tauri 环境下为完整绝对路径；浏览器降级为相对路径 */
   const cachePath = ref('WBMusic/cache')
 
+  /** 全局刷新计数器：每次全局刷新 +1，router-view :key 绑定它即可强制重挂载当前页面 */
+  const refreshKey = ref(0)
+
+  /** 触发全局刷新（递增计数器，页面组件重新挂载并拉取最新数据） */
+  function triggerRefresh() {
+    refreshKey.value += 1
+  }
+
   // 初始化缓存路径：
   // 1. 用户手动设置过 → 直接使用
   // 2. Tauri 环境 → 从后端获取缓存目录（默认在安装位置下，如 D:\Program Files\WBMusic\cache）
@@ -136,6 +144,8 @@ export const useAppStore = defineStore('app', () => {
     autoPlay,
     showLyrics,
     cachePath,
+    refreshKey,
+    triggerRefresh,
     toggleTheme,
     setDark,
     setThemeMode,

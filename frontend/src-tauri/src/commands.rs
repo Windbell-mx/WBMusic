@@ -167,6 +167,46 @@ pub fn get_login_status(state: State<'_, AppState>) -> Result<serde_json::Value,
     Ok(serde_json::Value::Object(map))
 }
 
+/// 全局刷新：校验所有已登录源的登录态，失效的自动登出（清内存 + 凭据库 + session.json），
+/// 返回各源最新登录状态。前端在全局刷新按钮 / F5 时调用。
+#[tauri::command]
+pub async fn refresh_all(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mut map = serde_json::Map::new();
+    for provider in state.providers.all() {
+        let kind = provider.kind();
+        let status = provider.login_status();
+        if status.logged_in {
+            // 校验登录态是否仍有效
+            let valid = provider.validate_login().await.unwrap_or(true);
+            if !valid {
+                log::info!("全局刷新：{} 登录态已失效，自动登出", kind.as_str());
+                let _ = provider.logout().await;
+                let mut store = state
+                    .session_store
+                    .lock()
+                    .map_err(|_| "会话存储锁获取失败".to_string())?;
+                match kind {
+                    MusicProviderKind::QqMusic => store.qq_music = ProviderSession::default(),
+                    MusicProviderKind::Netease => store.netease = ProviderSession::default(),
+                }
+                if let Err(e) = store.delete_credential(kind) {
+                    log::warn!("全局刷新：删除 {} 系统凭据失败: {}", kind.as_str(), e);
+                }
+                save_session(&app, &store)?;
+            }
+        }
+        let latest = provider.login_status();
+        map.insert(
+            kind.as_str().to_string(),
+            serde_json::to_value(latest).map_err(|e| e.to_string())?,
+        );
+    }
+    Ok(serde_json::Value::Object(map))
+}
+
 /// 获取歌曲播放地址
 #[tauri::command]
 pub async fn get_track_url(

@@ -115,6 +115,13 @@ pub trait MusicProvider: Send + Sync {
     /// 获取当前登录用户信息
     fn login_status(&self) -> LoginStatus;
 
+    /// 校验登录态是否仍然有效。
+    ///
+    /// 返回 `Ok(true)` 表示凭据仍有效；`Ok(false)` 表示已失效（登录态过期/
+    /// 凭据被吊销等），调用方应触发自动登出。实现方应尽量做真实的网络校验
+    /// （如调用需要登录态的接口），而非仅检查内存标志。
+    async fn validate_login(&self) -> Result<bool, String>;
+
     /// 搜索歌曲
     async fn search(&self, keyword: &str, limit: u32) -> Result<SearchResult, String>;
 

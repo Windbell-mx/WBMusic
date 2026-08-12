@@ -213,6 +213,27 @@ export const usePlayerStore = defineStore('player', () => {
     loadCurrent()
   }
 
+  /**
+   * 下一首播放：把歌曲插入到当前播放位置之后并立即播放
+   * （已在队列中则直接跳到该歌曲）
+   */
+  function playNext(track: Track) {
+    const idx = playlist.value.findIndex(
+      (t) => t.id === track.id && t.source === track.source,
+    )
+    if (idx >= 0) {
+      currentIndex.value = idx
+    } else {
+      const insertAt =
+        currentIndex.value >= 0
+          ? currentIndex.value + 1
+          : playlist.value.length
+      playlist.value.splice(insertAt, 0, track)
+      currentIndex.value = insertAt
+    }
+    loadCurrent()
+  }
+
   /** 真机环境播放失败处理：提示失败原因并自动跳过（带死循环保护） */
   function handleLoadFailure(track: Track, e: unknown) {
     consecutiveFailures++
@@ -311,6 +332,18 @@ export const usePlayerStore = defineStore('player', () => {
       currentSec.value = audio.currentTime
       scheduleSave()
     }
+  }
+
+  /** 按秒跳转（歌词点击跳转用） */
+  function seekTo(seconds: number) {
+    if (!audio.duration || Number.isNaN(audio.duration)) return
+    if (seconds < 0) seconds = 0
+    if (seconds > audio.duration) seconds = audio.duration
+    audio.currentTime = seconds
+    progress.value = (seconds / audio.duration) * 100
+    lastSavedTime = seconds
+    currentSec.value = seconds
+    scheduleSave()
   }
 
   function setVolume(value: number) {
@@ -481,9 +514,11 @@ export const usePlayerStore = defineStore('player', () => {
     modeTitle,
     nextModeTitle,
     playTrack,
+    playNext,
     playPlaylist,
     togglePlay,
     seek,
+    seekTo,
     setVolume,
     prevTrack,
     nextTrack,

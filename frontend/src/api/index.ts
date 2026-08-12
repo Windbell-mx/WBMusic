@@ -119,6 +119,17 @@ export async function getLoginStatus(): Promise<Record<MusicSource, LoginStatus>
 }
 
 /**
+ * 全局刷新：后端校验所有已登录源的登录态（失效的自动登出），
+ * 返回各源最新登录状态。前端在刷新按钮 / F5 时调用。
+ */
+export async function refreshAll(): Promise<Record<MusicSource, LoginStatus>> {
+  if (isTauri) {
+    return invoke('refresh_all')
+  }
+  return getLoginStatus()
+}
+
+/**
  * 获取歌曲播放地址
  */
 export async function getTrackUrl(source: MusicSource, trackId: string): Promise<string> {
