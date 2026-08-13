@@ -314,67 +314,93 @@ impl NeteaseProvider {
 
         // 3. 需要补全的 ID：trackIds 中尚未在 tracks 里的
         let mut existing: HashSet<String> = tracks.iter().map(|t| t.id.clone()).collect();
-        let missing: Vec<&String> = track_ids
+        let missing: Vec<String> = track_ids
             .iter()
             .filter(|id| !existing.contains(*id))
+            .cloned()
             .collect();
         if !missing.is_empty() {
             // 批量拉取（实测网易云 song/detail 单批上限约 200，超过返回 code=400）
-            for chunk in missing.chunks(200) {
-                // c 必须是 JSON 数组字符串，如 [{"id":1},{"id":2}]（带外层方括号）
-                let c = chunk
-                    .iter()
-                    .map(|id| format!("{{\"id\":{}}}", id))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let c = format!("[{}]", c);
-                // c 含 { } " : , 等保留字符，必须 URL 编码
-                let url = reqwest::Url::parse_with_params(
-                    &format!("{}/api/v3/song/detail", API_BASE),
-                    &[("c", &c)],
-                )
-                .map_err(|e| format!("构建歌曲详情请求失败: {}", e))?;
-                let resp = self
-                    .client
-                    .get(url)
-                    .headers(self.cookie_headers()?)
-                    .send()
-                    .await
-                    .map_err(|e| format!("获取歌单歌曲详情失败: {}", e))?;
-                let sj: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| format!("解析歌单歌曲详情失败: {}", e))?;
-                if let Some(songs) = sj["songs"].as_array() {
-                    for s in songs {
-                        let id = s["id"].as_i64().unwrap_or(0).to_string();
-                        if id == "0" || existing.contains(&id) {
-                            continue;
+            // 并发执行各批次：歌单歌曲多时（如 1000+ 首）避免串行等待造成卡顿
+            let client = self.client.clone();
+            let headers = self.cookie_headers()?;
+            let mut set = tokio::task::JoinSet::new();
+            for (chunk_idx, chunk) in missing.chunks(200).enumerate() {
+                let client = client.clone();
+                let headers = headers.clone();
+                let ids: Vec<String> = chunk.to_vec();
+                set.spawn(async move {
+                    // c 必须是 JSON 数组字符串，如 [{"id":1},{"id":2}]（带外层方括号）
+                    let c = ids
+                        .iter()
+                        .map(|id| format!("{{\"id\":{}}}", id))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let c = format!("[{}]", c);
+                    // c 含 { } " : , 等保留字符，必须 URL 编码
+                    let url = reqwest::Url::parse_with_params(
+                        &format!("{}/api/v3/song/detail", API_BASE),
+                        &[("c", &c)],
+                    )
+                    .map_err(|e| format!("构建歌曲详情请求失败: {}", e))?;
+                    let resp = client
+                        .get(url)
+                        .headers(headers)
+                        .send()
+                        .await
+                        .map_err(|e| format!("获取歌单歌曲详情失败: {}", e))?;
+                    let sj: Value = resp
+                        .json()
+                        .await
+                        .map_err(|e| format!("解析歌单歌曲详情失败: {}", e))?;
+                    let mut batch: Vec<Track> = Vec::new();
+                    if let Some(songs) = sj["songs"].as_array() {
+                        for s in songs {
+                            let id = s["id"].as_i64().unwrap_or(0).to_string();
+                            if id == "0" {
+                                continue;
+                            }
+                            let title = s["name"].as_str().unwrap_or("未知歌曲").to_string();
+                            let artist = s["ar"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|x| x["name"].as_str())
+                                        .collect::<Vec<_>>()
+                                        .join("/")
+                                })
+                                .unwrap_or_default();
+                            let album = s["al"]["name"].as_str().map(|x| x.to_string());
+                            let duration = s["dt"].as_u64().map(|d| (d / 1000) as u32);
+                            let cover_url = s["al"]["picUrl"].as_str().map(|x| x.to_string());
+                            batch.push(Track {
+                                id,
+                                title,
+                                artist,
+                                album,
+                                duration,
+                                cover_url,
+                                source: MusicProviderKind::Netease,
+                            });
                         }
-                        let title = s["name"].as_str().unwrap_or("未知歌曲").to_string();
-                        let artist = s["ar"]
-                            .as_array()
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|x| x["name"].as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("/")
-                            })
-                            .unwrap_or_default();
-                        let album = s["al"]["name"].as_str().map(|x| x.to_string());
-                        let duration = s["dt"].as_u64().map(|d| (d / 1000) as u32);
-                        let cover_url = s["al"]["picUrl"].as_str().map(|x| x.to_string());
-                        existing.insert(id.clone());
-                        tracks.push(Track {
-                            id,
-                            title,
-                            artist,
-                            album,
-                            duration,
-                            cover_url,
-                            source: MusicProviderKind::Netease,
-                        });
                     }
+                    Ok::<(usize, Vec<Track>), String>((chunk_idx, batch))
+                });
+            }
+            // 按批次顺序合并结果，保持歌单原有歌曲顺序
+            let mut results: Vec<(usize, Vec<Track>)> = Vec::new();
+            while let Some(res) = set.join_next().await {
+                let (chunk_idx, batch) = res.map_err(|e| format!("歌曲详情任务失败: {}", e))??;
+                results.push((chunk_idx, batch));
+            }
+            results.sort_by_key(|(idx, _)| *idx);
+            for (_, batch) in results {
+                for t in batch {
+                    if existing.contains(&t.id) {
+                        continue;
+                    }
+                    existing.insert(t.id.clone());
+                    tracks.push(t);
                 }
             }
         }
@@ -883,6 +909,133 @@ impl MusicProvider for NeteaseProvider {
             return Err(format!("收藏失败 (code={})", code));
         }
         Ok(())
+    }
+
+    async fn get_liked_track_ids(&self) -> Result<Vec<String>, String> {
+        // 需登录。定位「我喜欢的音乐」歌单（specialType == 5），
+        // 再直接解析其 playlist/detail 的 trackIds 字段取全量歌曲 ID。
+        // 注意：不要用 fetch_playlist_detail（它会对缺失歌曲逐批 song/detail 补全，
+        // 收藏越多越慢），这里只需要 ID，一次请求即可拿到全部。
+        let (_nickname, uid) = self
+            .validate_cookie(None)
+            .await
+            .map_err(|e| format!("获取用户信息失败（请确认已登录网易云）: {}", e))?;
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/user/playlist?uid={}&limit=30&offset=0&includeVideo=true",
+                API_BASE, uid
+            ))
+            .headers(self.cookie_headers()?)
+            .send()
+            .await
+            .map_err(|e| format!("获取用户歌单失败: {}", e))?;
+        let j: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析用户歌单失败: {}", e))?;
+        let playlists = j["playlist"]
+            .as_array()
+            .ok_or("用户歌单响应格式异常")?;
+        // 「我喜欢的音乐」歌单（网易云 specialType == 5）
+        let liked_id = playlists
+            .iter()
+            .find(|p| p["specialType"].as_i64().unwrap_or(0) == 5)
+            .and_then(|p| p["id"].as_i64().map(|i| i.to_string()))
+            .ok_or("未找到「我喜欢的音乐」歌单")?;
+        // 直接解析 trackIds（全量 ID），带时间戳绕过 CDN 缓存
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| format!("获取时间戳失败: {}", e))?
+            .as_millis();
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/v6/playlist/detail?id={}&_t={}",
+                API_BASE, liked_id, ts
+            ))
+            .headers(self.cookie_headers()?)
+            .send()
+            .await
+            .map_err(|e| format!("获取「我喜欢的音乐」歌单详情失败: {}", e))?;
+        let j: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析「我喜欢的音乐」歌单详情失败: {}", e))?;
+        if j["code"].as_i64().unwrap_or(-1) != 200 {
+            return Err("获取「我喜欢的音乐」歌单详情失败".into());
+        }
+        let ids: Vec<String> = j["playlist"]["trackIds"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x["id"].as_i64())
+                    .map(|id| id.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(ids)
+    }
+
+    async fn create_playlist(&self, name: &str, description: Option<&str>) -> Result<Playlist, String> {
+        // 需登录（Cookie 必须有效），未登录直接报错
+        let cookie = {
+            let guard = self
+                .session
+                .lock()
+                .map_err(|_| "会话锁获取失败".to_string())?;
+            if !guard.logged_in {
+                return Err("请先登录网易云音乐".into());
+            }
+            guard.credential.clone().unwrap_or_default()
+        };
+
+        // csrf_token 取自 Cookie 中的 __csrf 字段
+        let csrf = cookie
+            .split(';')
+            .find_map(|p| {
+                let p = p.trim();
+                p.strip_prefix("__csrf=").map(|v| v.to_string())
+            })
+            .unwrap_or_default();
+
+        let resp = self
+            .client
+            .post(format!("{}/api/playlist/create", API_BASE))
+            .headers(self.cookie_headers()?)
+            .form(&[
+                ("name", name),
+                ("desc", description.unwrap_or("")),
+                ("tags", ""),
+                ("type", "0"),
+                ("time", "25"),
+                ("csrf_token", &csrf),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("创建歌单请求失败: {}", e))?;
+        let j: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析创建歌单响应失败: {}", e))?;
+        let code = j["code"].as_i64().unwrap_or(-1);
+        if code != 200 {
+            let hint = j["msg"].as_str().unwrap_or("");
+            return Err(format!("创建歌单失败 (code={}){}", code, if hint.is_empty() { String::new() } else { format!("：{}", hint) }));
+        }
+        let p = &j["playlist"];
+        Ok(Playlist {
+            id: p["id"].as_i64().map(|v| v.to_string()).unwrap_or_default(),
+            name: p["name"].as_str().unwrap_or(name).to_string(),
+            description: p["description"]
+                .as_str()
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty()),
+            cover_url: p["coverImgUrl"].as_str().map(|s| s.to_string()),
+            track_count: p["trackCount"].as_u64().unwrap_or(0) as u32,
+            play_count: 0,
+            source: self.kind,
+        })
     }
 }
 

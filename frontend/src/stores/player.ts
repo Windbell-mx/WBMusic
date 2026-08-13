@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import type { Track } from '@/api'
-import { isTauri, likeTrack } from '@/api'
+import { isTauri, likeTrack, getLikedTrackIds, invalidateLikedCache } from '@/api'
 import { createDiscreteApi } from 'naive-ui'
 import { useAppStore } from './app'
 
@@ -108,13 +108,23 @@ export const usePlayerStore = defineStore('player', () => {
       if (!raw) return
       const s = JSON.parse(raw) as Partial<SavedPlayerState>
       if (Array.isArray(s.playlist)) {
-        playlist.value = s.playlist.filter(
+        // 过滤历史遗留的演示/测试歌曲（浏览器 mock 或早期测试产生的记录）
+        const cleaned = s.playlist.filter(
           (t): t is Track =>
             !!t &&
             typeof t.id !== 'undefined' &&
             typeof t.title === 'string' &&
-            !String(t.id).includes('-mock-'), // 过滤历史遗留的演示歌曲
+            !String(t.id).includes('-mock-') &&
+            !t.title.includes('演示') &&
+            !t.title.includes('测试'),
         )
+        playlist.value = cleaned
+        // 清理后列表为空：直接清除整条播放记录，避免残留测试数据
+        if (cleaned.length === 0 && s.playlist.length > 0) {
+          localStorage.removeItem(STORAGE_KEY)
+          currentIndex.value = -1
+          return
+        }
       }
       if (
         typeof s.currentIndex === 'number' &&
@@ -258,6 +268,11 @@ export const usePlayerStore = defineStore('player', () => {
     if (!track) return
     // 切歌/加载时重置进度显示，等 durationchange 后更新
     progress.value = 0
+    // 切歌后同步红心状态（不阻塞播放加载，失败静默）
+    syncLikedState()
+    // 同步重置歌词高亮用的真实秒数：否则切歌瞬间会残留上一首的播放时间，
+    // 歌词按错误行高亮，与已归零的进度条不同步（直到新音频首个 timeupdate 才纠正）
+    currentSec.value = 0
     totalSeconds = 0
     audioDuration.value = 0
     try {
@@ -395,6 +410,8 @@ export const usePlayerStore = defineStore('player', () => {
     likeTrack(track.source, track.id, target)
       .then(() => {
         message.success(target ? '已收藏到默认喜欢歌单' : '已取消收藏')
+        // 红心缓存失效：下次进入详情页/再查红心时状态是最新的
+        invalidateLikedCache(track.source)
         scheduleSave()
       })
       .catch((err: unknown) => {
@@ -402,6 +419,37 @@ export const usePlayerStore = defineStore('player', () => {
         isLiked.value = !target
         message.error(`收藏失败：${err instanceof Error ? err.message : String(err)}`)
       })
+  }
+
+  /**
+   * 若指定歌曲就是当前播放曲目，同步其收藏状态（红心）。
+   * 供歌单详情页五角星点击后调用，使底部播放器红心与详情页保持一致。
+   */
+  function applyLikedIfCurrent(trackId: string, liked: boolean) {
+    const track = currentTrack.value
+    if (track && String(track.id) === String(trackId) && isLiked.value !== liked) {
+      isLiked.value = liked
+      scheduleSave()
+    }
+  }
+
+  /**
+   * 根据当前播放曲目从后端查询真实红心状态并同步 isLiked。
+   * 切歌/加载时调用（fire-and-forget），已收藏的歌红心即时变红。
+   */
+  async function syncLikedState() {
+    const track = currentTrack.value
+    if (!track || !isTauri) return
+    try {
+      const likedIds = await getLikedTrackIds(track.source)
+      const liked = likedIds.includes(String(track.id))
+      if (isLiked.value !== liked) {
+        isLiked.value = liked
+        scheduleSave()
+      }
+    } catch {
+      /* 查询失败（如未登录）保持原状态 */
+    }
   }
 
   function pauseAll() {
@@ -525,6 +573,8 @@ export const usePlayerStore = defineStore('player', () => {
     cyclePlayMode,
     setPlayMode,
     toggleLike,
+    applyLikedIfCurrent,
+    syncLikedState,
     pauseAll,
     removeTrack,
     clearPlaylist,

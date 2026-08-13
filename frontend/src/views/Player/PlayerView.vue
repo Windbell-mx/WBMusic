@@ -268,7 +268,9 @@ async function loadLyrics() {
         .map((line) => {
           const match = line.match(/\[(\d+):(\d+)(?:\.(\d+))?\](.*)/)
           if (match) {
-            const time = Number(match[1]) * 60 + Number(match[2]) + Number(match[3] || 0) / 100
+            // 兼容两种时间戳精度：标准 LRC 的 [mm:ss.xx]（百分秒）与 [mm:ss.xxx]（毫秒）
+            const fracMs = match[3] ? Number(match[3].padEnd(3, '0')) / 1000 : 0
+            const time = Number(match[1]) * 60 + Number(match[2]) + fracMs
             return { time, text: match[4].trim() }
           }
           return null
@@ -413,6 +415,16 @@ watch(
   },
 )
 
+// 歌词区被 v-if 隐藏后再显示时，窗口高度可能已变化（窗口缩放等），重新测量保证高亮行居中
+watch(
+  () => appStore.showLyrics,
+  (visible) => {
+    if (visible) {
+      requestAnimationFrame(updateLyricWindowH)
+    }
+  },
+)
+
 onMounted(() => {
   // 测量歌词窗口实际高度（受窗口大小影响），用于高亮行居中
   requestAnimationFrame(updateLyricWindowH)
@@ -502,8 +514,13 @@ onBeforeUnmount(() => {
   transition: color 0.2s, transform 0.2s;
 }
 
-.header-btn:hover {
-  color: #fff;
+.header-btn:focus {
+  color: rgba(255, 255, 255, 0.8) !important;
+}
+
+.header-btn:hover,
+.header-btn:focus:hover {
+  color: #fff !important;
   transform: scale(1.1);
 }
 
@@ -771,7 +788,8 @@ onBeforeUnmount(() => {
 .lyric-list {
   display: flex;
   flex-direction: column;
-  transition: transform 0.5s ease;
+  /* 0.3s：比 0.5s 更跟手，滚动及时跟上音频进度，减少视觉不同步 */
+  transition: transform 0.3s ease;
 }
 
 /* 手动浏览模式：滚轮直接控制位移，无需平滑过渡动画 */
@@ -861,8 +879,9 @@ onBeforeUnmount(() => {
   position: relative;
   z-index: 10;
   padding: 12px 6vw 14px;
-  background: rgba(10, 12, 28, 0.55);
-  backdrop-filter: blur(24px);
+  /* 半透明背景代替毛玻璃：blur(24px) 全宽常驻在 WebView2 上
+     滚动歌词/切歌时每帧重采样背景，会卡。半透明色视觉接近且零开销 */
+  background: rgba(10, 12, 28, 0.72);
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
@@ -907,8 +926,13 @@ onBeforeUnmount(() => {
   position: relative;
 }
 
-.mode-btn:hover {
-  color: #8b9cf5;
+.mode-btn:focus {
+  color: var(--accent-light) !important;
+}
+
+.mode-btn:hover,
+.mode-btn:focus:hover {
+  color: #8b9cf5 !important;
   transform: scale(1.1);
 }
 
@@ -940,8 +964,15 @@ onBeforeUnmount(() => {
   transition: color 0.2s, transform 0.2s;
 }
 
-.ctrl-btn:hover {
-  color: #fff;
+/* 点击后按钮会保留键盘焦点，naive-ui 默认在 :focus 套用主题色（表现为"按下去后颜色不恢复"）。
+   用 !important 压过 naive-ui 的 :focus 规则恢复常态色；悬停规则放其后，悬停时仍正常高亮 */
+.ctrl-btn:focus {
+  color: rgba(255, 255, 255, 0.7) !important;
+}
+
+.ctrl-btn:hover,
+.ctrl-btn:focus:hover {
+  color: #fff !important;
   transform: scale(1.1);
 }
 
@@ -997,8 +1028,13 @@ onBeforeUnmount(() => {
   transition: color 0.2s;
 }
 
-.action-btn:hover {
-  color: #fff;
+.action-btn:focus {
+  color: rgba(255, 255, 255, 0.5) !important;
+}
+
+.action-btn:hover,
+.action-btn:focus:hover {
+  color: #fff !important;
 }
 
 /* 响应式（播放页为全屏覆盖层，可用宽度 = 视口宽度） */

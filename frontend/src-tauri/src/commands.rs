@@ -322,6 +322,40 @@ pub async fn like_track(
     provider.like_track(&track_id, like).await
 }
 
+/// 获取指定平台已收藏（红心）的歌曲 ID 列表（需登录）
+#[tauri::command]
+pub async fn get_liked_track_ids(
+    state: State<'_, AppState>,
+    source: String,
+) -> Result<Vec<String>, String> {
+    let kind = MusicProviderKind::from_str(&source)
+        .ok_or_else(|| format!("未知音乐源: {}", source))?;
+    let provider = state
+        .providers
+        .get(kind)
+        .ok_or_else(|| format!("音乐源未注册: {}", source))?;
+    provider.get_liked_track_ids().await
+}
+
+/// 在指定平台创建歌单
+#[tauri::command]
+pub async fn create_playlist(
+    state: State<'_, AppState>,
+    source: String,
+    name: String,
+    description: Option<String>,
+) -> Result<Playlist, String> {
+    let kind = MusicProviderKind::from_str(&source)
+        .ok_or_else(|| format!("未知音乐源: {}", source))?;
+    let provider = state
+        .providers
+        .get(kind)
+        .ok_or_else(|| format!("音乐源未注册: {}", source))?;
+    provider
+        .create_playlist(&name, description.as_deref())
+        .await
+}
+
 /// 从凭据中提取明文（用于持久化）
 fn credential_plain(credential: &LoginCredential) -> Option<String> {
     match credential {
@@ -357,6 +391,199 @@ fn save_session(app: &tauri::AppHandle, store: &SessionStore) -> Result<(), Stri
         .app_data_dir()
         .map_err(|e| format!("获取应用数据目录失败: {}", e))?;
     store.save(&dir)
+}
+
+/// 校验缓存键：仅允许字母、数字、下划线、连字符、点与冒号（防止路径穿越）
+fn validate_cache_key(key: &str) -> Result<(), String> {
+    let valid = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'));
+    if valid {
+        Ok(())
+    } else {
+        Err("非法缓存键".into())
+    }
+}
+
+/// 将缓存键转义为安全文件名（Windows 不允许 `:` `*` 等字符，冒号会被当作 NTFS 数据流分隔符）
+fn cache_file_name(key: &str) -> String {
+    let sanitized: String = key
+        .chars()
+        .map(|c| {
+            if matches!(c, ':' | '.' | '\\' | '/' | '?' | '*' | '<' | '>' | '|' | '"') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    format!("wbmusic_{}.json", sanitized)
+}
+
+/// 拼接缓存文件路径（wbmusic_<key>.json）
+fn cache_file_path(dir: &str, key: &str) -> Result<std::path::PathBuf, String> {
+    validate_cache_key(key)?;
+    let dir_path = std::path::PathBuf::from(dir);
+    Ok(dir_path.join(cache_file_name(key)))
+}
+
+/// 写入缓存文件（自动创建目录）
+/// 异步 + spawn_blocking：文件 IO 放到线程池，避免阻塞 Tauri 主线程
+#[tauri::command]
+pub async fn write_cache_file(dir: String, key: String, content: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建缓存目录失败: {}", e))?;
+        let path = cache_file_path(&dir, &key)?;
+        std::fs::write(&path, content).map_err(|e| format!("写入缓存文件失败: {}", e))
+    })
+    .await
+    .map_err(|e| format!("缓存写入任务失败: {}", e))?
+}
+
+/// 读取缓存文件（不存在返回 None）
+/// 异步 + spawn_blocking：文件 IO 放到线程池，避免阻塞 Tauri 主线程
+#[tauri::command]
+pub async fn read_cache_file(dir: String, key: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
+        let path = cache_file_path(&dir, &key)?;
+        match std::fs::read_to_string(&path) {
+            Ok(content) => Ok(Some(content)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("读取缓存文件失败: {}", e)),
+        }
+    })
+    .await
+    .map_err(|e| format!("缓存读取任务失败: {}", e))?
+}
+
+/// 删除单个缓存文件
+#[tauri::command]
+pub async fn remove_cache_file(dir: String, key: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let path = cache_file_path(&dir, &key)?;
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| format!("删除缓存文件失败: {}", e))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("缓存删除任务失败: {}", e))?
+}
+
+/// 清空缓存目录下本应用生成的缓存文件（仅删除 wbmusic_*.json，避免误删用户目录中的其他文件）
+#[tauri::command]
+pub async fn clear_cache_files(dir: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        if !std::path::Path::new(&dir).exists() {
+            return Ok(());
+        }
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| format!("读取缓存目录失败: {}", e))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path
+                    .file_name()
+                    .map(|n| {
+                        let s = n.to_string_lossy();
+                        s.starts_with("wbmusic_") && s.ends_with(".json")
+                    })
+                    .unwrap_or(false)
+            {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("缓存清理任务失败: {}", e))?
+}
+
+/// 统计缓存目录中本应用缓存文件的总大小（字节）
+#[tauri::command]
+pub async fn cache_dir_size(dir: String) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<u64, String> {
+        if !std::path::Path::new(&dir).exists() {
+            return Ok(0);
+        }
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| format!("读取缓存目录失败: {}", e))?;
+        let mut total: u64 = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path
+                    .file_name()
+                    .map(|n| {
+                        let s = n.to_string_lossy();
+                        s.starts_with("wbmusic_") && s.ends_with(".json")
+                    })
+                    .unwrap_or(false)
+            {
+                total += path.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+        Ok(total)
+    })
+    .await
+    .map_err(|e| format!("缓存统计任务失败: {}", e))?
+}
+
+/// 缓存总大小超过 max_bytes 时，按修改时间从旧到新删除本应用缓存文件，直到不超过上限
+#[tauri::command]
+pub async fn prune_cache_files(dir: String, max_bytes: u64) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        if max_bytes == 0 {
+            return Ok(());
+        }
+        if !std::path::Path::new(&dir).exists() {
+            return Ok(());
+        }
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| format!("读取缓存目录失败: {}", e))?;
+        // 收集 (修改时间, 路径, 大小)
+        let mut files: Vec<(u64, std::path::PathBuf, u64)> = Vec::new();
+        let mut total: u64 = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path
+                    .file_name()
+                    .map(|n| {
+                        let s = n.to_string_lossy();
+                        s.starts_with("wbmusic_") && s.ends_with(".json")
+                    })
+                    .unwrap_or(false)
+            {
+                if let Ok(meta) = path.metadata() {
+                    let modified = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    total += meta.len();
+                    files.push((modified, path, meta.len()));
+                }
+            }
+        }
+        if total <= max_bytes {
+            return Ok(());
+        }
+        files.sort_by_key(|(m, _, _)| *m);
+        for (_, path, size) in files {
+            if total <= max_bytes {
+                break;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(size);
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("缓存清理任务失败: {}", e))?
 }
 
 /// 生成注入到登录页的初始化脚本：

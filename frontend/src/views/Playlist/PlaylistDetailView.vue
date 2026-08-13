@@ -1,6 +1,6 @@
 ﻿<template>
-  <n-layout>
-    <n-layout-header style="padding: 16px; background: var(--n-color)">
+  <n-layout class="detail-page-layout">
+    <n-layout-header style="padding: 8px 14px; background: var(--n-color); position: sticky; top: 0; z-index: 10; box-shadow: 0 1px 4px rgba(0,0,0,.06)">
       <n-space justify="space-between" align="center">
         <n-space>
           <n-button text @click="router.back()">
@@ -8,24 +8,24 @@
           </n-button>
           <n-h2 style="margin: 0">{{ playlist?.name }}</n-h2>
         </n-space>
-        <n-space>
-          <n-button type="primary" @click="playAll">
-            <template #icon>
-              <n-icon :component="Play" />
-            </template>
-            播放全部
-          </n-button>
-          <n-button @click="shufflePlay">
-            <template #icon>
-              <n-icon :component="Shuffle" />
-            </template>
-            随机播放
-          </n-button>
-        </n-space>
+        <!-- 歌单内搜索：实时过滤歌曲/歌手/专辑 -->
+        <n-input
+          v-if="playlist"
+          v-model:value="searchQuery"
+          placeholder="搜索歌曲 / 歌手 / 专辑"
+          clearable
+          round
+          size="small"
+          style="width: 240px"
+        >
+          <template #prefix>
+            <n-icon :component="Search" />
+          </template>
+        </n-input>
       </n-space>
     </n-layout-header>
 
-    <n-layout-content style="padding: 16px">
+    <n-layout-content style="padding: 12px">
       <!-- 加载中 -->
       <div v-if="loading" class="state-wrap">
         <n-spin size="large" />
@@ -80,10 +80,35 @@
 
         <n-divider />
 
+        <!-- 搜索状态提示 -->
+        <n-space
+          v-if="searchQuery.trim()"
+          align="center"
+          style="margin-bottom: 8px"
+        >
+          <n-text depth="3" style="font-size: 13px">
+            找到 {{ filteredTracks.length }} 首与“{{ searchQuery.trim() }}”匹配的歌曲
+          </n-text>
+          <n-button text size="small" type="primary" @click="searchQuery = ''">
+            清除筛选
+          </n-button>
+        </n-space>
+
+        <!-- 搜索无结果 -->
+        <n-empty
+          v-if="filteredTracks.length === 0"
+          size="small"
+          description="没有找到匹配的歌曲"
+          style="padding: 32px 0"
+        />
+
         <n-data-table
+          v-else
           :columns="columns"
-          :data="playlist.tracks || []"
+          :data="filteredTracks"
           :scroll-x="300"
+          :max-height="tableMaxHeight"
+          virtual-scroll
           striped
         />
       </template>
@@ -95,7 +120,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, h } from 'vue'
+import { ref, computed, onMounted, onUnmounted, h } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { NIcon, NButton, NSpin, NEmpty, NSpace, NDropdown, NEllipsis, createDiscreteApi } from 'naive-ui'
 import {
@@ -106,6 +131,7 @@ import {
   Time,
   Star,
   EllipsisHorizontal,
+  Search,
 } from '@vicons/ionicons5'
 import type { DataTableColumns } from 'naive-ui'
 import { usePlayerStore } from '@/stores/player'
@@ -113,6 +139,8 @@ import LoginModal from '@/components/LoginModal.vue'
 import {
   getPlaylistDetail,
   likeTrack,
+  getLikedTrackIds,
+  invalidateLikedCache,
   isTauri,
   type Track as ApiTrack,
   type MusicSource,
@@ -174,6 +202,37 @@ const playlist = ref<Playlist | null>(null)
 const loading = ref(true)
 const errorMsg = ref('')
 
+/* ---------- 歌单内搜索 ---------- */
+
+const searchQuery = ref('')
+
+/** 过滤后的曲目：匹配歌曲名 / 歌手 / 专辑（大小写不敏感），空关键词返回全部 */
+const filteredTracks = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  const tracks = playlist.value?.tracks || []
+  if (!q) return tracks
+  return tracks.filter(
+    (t) =>
+      t.title.toLowerCase().includes(q) ||
+      t.artist.toLowerCase().includes(q) ||
+      t.album.toLowerCase().includes(q),
+  )
+})
+
+/** 表格最大高度：适配窗口，留出顶部歌单信息 + 底部播放条的空间。
+    外层滚动容器高度 = 视口 - 36(标题栏) - 84(播放器)，此处同步减去，
+    避免表格底部滚到播放器后面。顶部占用已压缩（sticky 头 46px + 封面 200px），
+    表格可用的空间相应增大。 */
+const viewportHeight = ref(window.innerHeight)
+const tableMaxHeight = computed(() => Math.max(viewportHeight.value - 300, 240))
+
+// 窗口尺寸变化时更新表格高度（虚拟滚动需要准确的 max-height）
+function onViewportResize() {
+  viewportHeight.value = window.innerHeight
+}
+onMounted(() => window.addEventListener('resize', onViewportResize))
+onUnmounted(() => window.removeEventListener('resize', onViewportResize))
+
 // 本地曲目 → 播放器 store 曲目
 function toApiTrack(track: Track): ApiTrack {
   // 本地 duration 是 "mm:ss" 字符串，转回秒数
@@ -209,7 +268,7 @@ const columns: DetailColumn[] = [
   {
     title: '#',
     key: 'index',
-    width: 44,
+    width: 56,
     render: (_row, index) => index + 1,
   },
   {
@@ -327,6 +386,8 @@ const columns: DetailColumn[] = [
 async function toggleLike(track: Track) {
   const target = !track.isLiked
   track.isLiked = target
+  // 同步底部播放器红心（若正在播放的就是这首歌）
+  player.applyLikedIfCurrent(track.id, target)
   // 浏览器环境直接模拟成功
   if (!isTauri) {
     message.success(target ? '已收藏（演示）' : '已取消收藏（演示）')
@@ -334,10 +395,13 @@ async function toggleLike(track: Track) {
   }
   try {
     await likeTrack(track.source, track.id, target)
+    // 失效已收藏缓存，下次进入详情页红心状态是最新的
+    invalidateLikedCache(track.source)
     message.success(target ? '已收藏到默认喜欢歌单' : '已取消收藏')
   } catch (e) {
     // 失败回滚
     track.isLiked = !target
+    player.applyLikedIfCurrent(track.id, !target)
     message.error(`收藏失败：${String(e)}`)
   }
 }
@@ -386,6 +450,7 @@ async function loadDetail() {
   needLogin.value = false
   try {
     const detail = await getPlaylistDetail(source, playlistId)
+    // 先渲染歌单详情（红心暂全部未收藏），保证页面尽快显示
     playlist.value = {
       id: detail.id,
       name: detail.name,
@@ -403,6 +468,19 @@ async function loadDetail() {
         coverUrl: t.cover_url,
       })),
     }
+    // 异步拉取已收藏（红心）歌曲 ID，拿到后回填红心状态。
+    // 不阻塞详情渲染；未登录或接口失败时红心保持未收藏。
+    getLikedTrackIds(source)
+      .then((likedIds) => {
+        const likedSet = new Set(likedIds)
+        const tracks = playlist.value?.tracks
+        if (tracks) {
+          for (const t of tracks) t.isLiked = likedSet.has(t.id)
+        }
+      })
+      .catch(() => {
+        // 忽略：红心状态保持未收藏
+      })
   } catch (e) {
     const err = String(e)
     errorMsg.value = err
@@ -418,6 +496,16 @@ onMounted(loadDetail)
 </script>
 
 <style scoped>
+/* 关键：naive-ui 的 n-layout 根元素默认 overflow: hidden，内部还有
+   .n-layout-scroll-container（overflow: hidden auto），二者都会拦截
+   header 的 sticky 定位（成为最近的滚动祖先但不滚动）。
+   把详情页布局根元素与其内部 scroll container 都改为 overflow: visible，
+   让 header 的 sticky 相对外层主内容区滚动容器生效，实现滚出时冻结在顶部。 */
+.detail-page-layout,
+.detail-page-layout :deep(.n-layout-scroll-container) {
+  overflow: visible;
+}
+
 .state-wrap {
   display: flex;
   flex-direction: column;
@@ -431,12 +519,12 @@ onMounted(loadDetail)
   display: flex;
   align-items: flex-start;
   gap: 32px;
-  padding: 8px 4px;
+  padding: 0 4px;
 }
 
 .detail-cover {
-  width: 240px;
-  height: 240px;
+  width: 200px;
+  height: 200px;
   flex-shrink: 0;
   border-radius: 16px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
@@ -447,7 +535,7 @@ onMounted(loadDetail)
   min-width: 0;
   display: flex;
   flex-direction: column;
-  padding-top: 8px;
+  padding-top: 0;
 }
 
 .detail-title {

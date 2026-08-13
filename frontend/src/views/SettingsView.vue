@@ -148,10 +148,45 @@
 
               <div class="setting-row">
                 <div class="setting-info">
-                  <span class="setting-label">清除缓存</span>
-                  <span class="setting-desc">清除本地缓存数据</span>
+                  <span class="setting-label">缓存上限</span>
+                  <span class="setting-desc">缓存超过上限后自动清理最旧数据</span>
                 </div>
-                <n-button size="small" secondary @click="clearCache">清除</n-button>
+                <div class="cache-limit-control">
+                  <n-select
+                    v-model:value="cacheLimitMode"
+                    :options="cacheLimitOptions"
+                    style="width: 110px"
+                  />
+                  <template v-if="cacheLimitMode === 'custom'">
+                    <n-input-number
+                      v-model:value="customCacheLimitGB"
+                      :min="0.1"
+                      :max="1024"
+                      :precision="2"
+                      :show-button="false"
+                      placeholder="输入大小"
+                      style="width: 100px"
+                    />
+                    <span class="cache-limit-unit">GB</span>
+                  </template>
+                </div>
+              </div>
+
+              <n-divider style="margin: 4px 0" />
+
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-label">清除缓存</span>
+                  <span class="setting-desc">清除本地缓存数据{{ cacheUsageText }}</span>
+                </div>
+                <n-button
+                  size="small"
+                  secondary
+                  :loading="clearingCache"
+                  @click="clearCache"
+                >
+                  清除
+                </n-button>
               </div>
 
               <n-divider style="margin: 4px 0" />
@@ -167,6 +202,68 @@
           </n-card>
         </section>
 
+        <!-- 快捷键 -->
+        <section v-show="activeSection === 'shortcuts'">
+          <n-card title="快捷键" class="settings-card">
+            <n-text depth="3" style="font-size: 12px; line-height: 1.6">
+              应用窗口聚焦时生效。点击「录制」后直接按下想绑定的组合键（支持方向键、空格、F 键与媒体键），按 Esc 取消录制。与其它动作冲突的键位会自动清除旧绑定。
+            </n-text>
+
+            <n-divider style="margin: 12px 0" />
+
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-label">启用快捷键</span>
+                <span class="setting-desc">关闭后全局快捷键全部失效（保留已绑定的键位）</span>
+              </div>
+              <n-switch v-model:value="shortcuts.enabled" />
+            </div>
+
+            <n-divider style="margin: 12px 0" />
+
+            <div v-for="action in shortcutActions" :key="action" class="shortcut-row">
+              <div class="setting-info">
+                <span class="setting-label">{{ shortcutLabels[action] }}</span>
+                <n-tag
+                  v-if="shortcuts.isRecording(action)"
+                  type="warning"
+                  size="small"
+                  style="margin-top: 4px"
+                >
+                  正在录制… 按下按键（Esc 取消）
+                </n-tag>
+                <span v-else class="shortcut-keys">
+                  {{ shortcuts.isEnabled(action) ? shortcuts.format(action) : '未设置' }}
+                </span>
+              </div>
+              <div class="shortcut-controls">
+                <n-button
+                  size="small"
+                  :type="shortcuts.isRecording(action) ? 'warning' : 'default'"
+                  :disabled="!shortcuts.enabled"
+                  @click="handleRecord(action)"
+                >
+                  {{ shortcuts.isRecording(action) ? '取消' : '录制' }}
+                </n-button>
+                <n-button
+                  size="small"
+                  secondary
+                  :disabled="!shortcuts.isEnabled(action)"
+                  @click="shortcuts.clear(action)"
+                >
+                  清除
+                </n-button>
+              </div>
+            </div>
+
+            <n-divider style="margin: 12px 0" />
+
+            <div class="shortcut-footer">
+              <n-button size="small" tertiary @click="handleResetShortcuts">恢复默认</n-button>
+            </div>
+          </n-card>
+        </section>
+
         <!-- 关于 -->
         <section v-show="activeSection === 'about'">
           <n-card title="关于" class="settings-card">
@@ -174,7 +271,7 @@
               <n-avatar round size="medium" class="about-logo">W</n-avatar>
               <div class="about-info">
                 <span class="about-name">WBMusic</span>
-                <n-text depth="3" style="font-size: 12px">v0.1.4 · 音乐播放器应用</n-text>
+                <n-text depth="3" style="font-size: 12px">v0.1.5 · 音乐播放器应用</n-text>
               </div>
             </div>
           </n-card>
@@ -213,26 +310,52 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, type Component } from 'vue'
+import { ref, computed, watch, onMounted, type Component } from 'vue'
 import { useMessage } from 'naive-ui'
 import { useAppStore, type ThemeMode } from '@/stores/app'
 import { usePlayerStore } from '@/stores/player'
-import { ColorPalette, Options, Server, InformationCircle } from '@vicons/ionicons5'
+import {
+  useShortcutStore,
+  SHORTCUT_ACTIONS,
+  ACTION_LABELS,
+  type ShortcutAction,
+} from '@/stores/shortcuts'
+import { ColorPalette, Options, Keypad, Server, InformationCircle } from '@vicons/ionicons5'
+import { clearAllCache, getCacheSize } from '@/utils/cache'
 
 const appStore = useAppStore()
 const player = usePlayerStore()
+const shortcuts = useShortcutStore()
 const message = useMessage()
 
-type SectionKey = 'appearance' | 'player' | 'storage' | 'about'
+type SectionKey = 'appearance' | 'player' | 'shortcuts' | 'storage' | 'about'
 
 const activeSection = ref<SectionKey>('appearance')
 
 const navItems: { key: SectionKey; label: string; icon: Component }[] = [
   { key: 'appearance', label: '外观', icon: ColorPalette },
   { key: 'player', label: '播放器', icon: Options },
+  { key: 'shortcuts', label: '快捷键', icon: Keypad },
   { key: 'storage', label: '存储与更新', icon: Server },
   { key: 'about', label: '关于', icon: InformationCircle },
 ]
+
+/** 快捷键动作列表（顺序即展示顺序） */
+const shortcutActions: ShortcutAction[] = SHORTCUT_ACTIONS
+const shortcutLabels = ACTION_LABELS
+
+function handleRecord(action: ShortcutAction) {
+  if (shortcuts.isRecording(action)) {
+    shortcuts.cancelRecord()
+    return
+  }
+  shortcuts.startRecord(action)
+}
+
+function handleResetShortcuts() {
+  shortcuts.resetAll()
+  message.success('已恢复默认快捷键')
+}
 
 /** 主题模式：双向绑定 app store（持久化） */
 const themeMode = computed<ThemeMode>({
@@ -277,12 +400,92 @@ function handleSidebar(value: boolean) {
   message.info(value ? '侧边栏已折叠' : '侧边栏已展开')
 }
 
-function clearCache() {
-  message.success('缓存已清除')
+const clearingCache = ref(false)
+
+/** 当前缓存占用大小文案（如「· 当前占用 3.2 MB」），为空时不显示 */
+const cacheUsageText = ref('')
+
+/** 格式化字节数为可读文案 */
+function formatBytes(bytes: number): string {
+  if (bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let i = 0
+  let value = bytes
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024
+    i++
+  }
+  return `${value.toFixed(value >= 100 || i === 0 ? 0 : 1)} ${units[i]}`
 }
 
+/** 刷新当前缓存占用显示 */
+async function refreshCacheUsage() {
+  const size = await getCacheSize()
+  cacheUsageText.value = size > 0 ? ` · 当前占用 ${formatBytes(size)}` : ''
+}
+
+/** 预设缓存上限（GB） */
+const PRESET_CACHE_GB = [1, 2, 5, 10]
+
+/** 缓存上限下拉：预设值直接生效；「自定义」时显示 GB 输入框 */
+type CacheLimitMode = number | 'custom'
+const cacheLimitMode = ref<CacheLimitMode>(
+  PRESET_CACHE_GB.includes(appStore.cacheLimitGB) ? appStore.cacheLimitGB : 'custom',
+)
+
+/** 自定义缓存上限（GB） */
+const customCacheLimitGB = ref<number | null>(appStore.cacheLimitGB)
+
+const cacheLimitOptions = [
+  { label: '1 GB', value: 1 },
+  { label: '2 GB', value: 2 },
+  { label: '5 GB', value: 5 },
+  { label: '10 GB', value: 10 },
+  { label: '自定义', value: 'custom' },
+]
+
+// 选择预设 → 立即生效；切到自定义 → 以当前生效值作为输入初始值
+watch(cacheLimitMode, (mode) => {
+  if (mode === 'custom') {
+    customCacheLimitGB.value = appStore.cacheLimitGB
+  } else {
+    appStore.setCacheLimitGB(mode)
+  }
+})
+
+// 自定义输入时实时持久化（仅自定义模式生效）
+watch(customCacheLimitGB, (v) => {
+  if (cacheLimitMode.value === 'custom' && v !== null && v > 0) {
+    appStore.setCacheLimitGB(v)
+  }
+})
+
+async function clearCache() {
+  clearingCache.value = true
+  try {
+    await clearAllCache()
+    message.success('缓存已清除')
+    await refreshCacheUsage()
+  } catch {
+    message.error('清除缓存失败')
+  } finally {
+    clearingCache.value = false
+  }
+}
+
+// 进入「存储与更新」页时刷新缓存占用；清除后也会刷新
+watch(
+  () => activeSection.value,
+  (v) => {
+    if (v === 'storage') refreshCacheUsage()
+  },
+)
+onMounted(() => {
+  if (activeSection.value === 'storage') refreshCacheUsage()
+})
+
 function checkUpdate() {
-  message.info('当前已是最新版本 v0.1.4')
+  message.info('当前已是最新版本 v0.1.5')
 }
 
 const showCachePathModal = ref(false)
@@ -437,6 +640,21 @@ function saveCachePath() {
   transform: scale(1.15);
 }
 
+/* 缓存上限 */
+.cache-limit-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cache-limit-unit {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+  line-height: 1;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* 缓存路径 */
 .cache-path-control {
   display: flex;
@@ -479,5 +697,37 @@ function saveCachePath() {
 .about-name {
   font-size: 15px;
   font-weight: 600;
+}
+
+/* 快捷键 */
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+}
+
+.shortcut-row + .shortcut-row {
+  border-top: 1px solid var(--n-divider-color);
+}
+
+.shortcut-keys {
+  font-size: 13px;
+  color: var(--n-text-color-2);
+  font-family: 'Consolas', 'Courier New', monospace;
+  margin-top: 4px;
+}
+
+.shortcut-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.shortcut-footer {
+  display: flex;
+  justify-content: flex-end;
 }
 </style>

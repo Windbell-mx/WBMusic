@@ -6,6 +6,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core'
+import { getCached, invalidateCache, CACHE_TTL } from '@/utils/cache'
 
 /** 音乐源类型 */
 export type MusicSource = 'qq_music' | 'netease'
@@ -179,6 +180,58 @@ export async function likeTrack(
   return
 }
 
+/**
+ * 获取指定平台已收藏（红心）的歌曲 ID 列表（需登录）
+ * 带缓存：TTL 5 分钟，收藏/取消收藏后需调用 invalidateLikedCache 失效
+ */
+export async function getLikedTrackIds(source: MusicSource): Promise<string[]> {
+  if (isTauri) {
+    return getCached<string[]>(
+      `liked:${source}`,
+      () => invoke<string[]>('get_liked_track_ids', { source }),
+      CACHE_TTL.playlist,
+    )
+  }
+  // 浏览器降级：模拟部分歌曲已收藏，便于演示红心状态
+  return ['demo-1', 'demo-3', 'demo-5']
+}
+
+/** 使指定平台「已收藏歌曲 ID」缓存失效（收藏/取消后调用） */
+export async function invalidateLikedCache(source: MusicSource): Promise<void> {
+  await invalidateCache(`liked:${source}`)
+}
+
+/**
+ * 在指定平台创建歌单
+ * @param source 音乐源（qq_music / netease）
+ * @param name 歌单名称
+ * @param description 歌单描述（可选）
+ * @returns 新创建的歌单信息
+ */
+export async function createPlaylist(
+  source: MusicSource,
+  name: string,
+  description?: string,
+): Promise<Playlist> {
+  if (isTauri) {
+    return invoke<Playlist>('create_playlist', {
+      source,
+      name,
+      description: description || null,
+    })
+  }
+  // 浏览器降级：返回本地占位歌单
+  return {
+    id: `local-${Date.now()}`,
+    name,
+    description: description || null,
+    cover_url: `https://picsum.photos/seed/playlist${Date.now()}/400/400`,
+    track_count: 0,
+    play_count: 0,
+    source,
+  }
+}
+
 /** 用户歌单 */
 export interface Playlist {
   id: string
@@ -213,22 +266,44 @@ export async function getUserPlaylists(source: MusicSource): Promise<Playlist[]>
 
 /**
  * 获取歌单详情（含歌曲列表）
+ * 带缓存：TTL 5 分钟，同一歌单重复进入直接秒开。
+ * 注意：歌单详情缓存由后端命令 get_playlist_detail 的缓存键区分平台。
  */
 export async function getPlaylistDetail(
   source: MusicSource,
   playlistId: string,
 ): Promise<PlaylistDetail> {
   if (isTauri) {
-    return invoke<PlaylistDetail>('get_playlist_detail', { source, playlistId })
+    return getCached<PlaylistDetail>(
+      `playlist-detail:${source}:${playlistId}`,
+      () => invoke<PlaylistDetail>('get_playlist_detail', { source, playlistId }),
+      CACHE_TTL.playlist,
+    )
   }
-  // 浏览器降级
+  // 浏览器降级：返回演示歌曲，便于验证红心状态与播放交互
+  const names =
+    source === 'netease'
+      ? ['晴天', '七里香', '夜曲', '稻香', '青花瓷', '告白气球']
+      : ['海阔天空', '光辉岁月', '真的爱你', '灰色轨迹', '不再犹豫', '喜欢你']
+  const artists =
+    source === 'netease'
+      ? ['周杰伦', '周杰伦', '周杰伦', '周杰伦', '周杰伦', '周杰伦']
+      : ['Beyond', 'Beyond', 'Beyond', 'Beyond', 'Beyond', 'Beyond']
   return {
     id: playlistId,
-    name: '歌单',
-    description: null,
-    cover_url: null,
-    track_count: 0,
-    tracks: [],
+    name: '演示歌单',
+    description: '浏览器演示数据（真实环境请登录后查看）',
+    cover_url: `https://picsum.photos/seed/${playlistId}/400/400`,
+    track_count: names.length,
+    tracks: names.map((title, i) => ({
+      id: `demo-${i + 1}`,
+      title,
+      artist: artists[i],
+      album: '演示专辑',
+      duration: 180 + i * 30,
+      cover_url: `https://picsum.photos/seed/demo-${i + 1}/200/200`,
+      source,
+    })),
   }
 }
 

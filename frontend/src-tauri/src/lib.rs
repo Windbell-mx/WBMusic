@@ -77,7 +77,15 @@ pub fn run() {
       commands::get_recommended_playlists,
       commands::get_category_playlists,
       commands::like_track,
+      commands::get_liked_track_ids,
+      commands::create_playlist,
       commands::get_cache_dir,
+      commands::write_cache_file,
+      commands::read_cache_file,
+      commands::remove_cache_file,
+      commands::clear_cache_files,
+      commands::cache_dir_size,
+      commands::prune_cache_files,
       commands::open_qr_login,
     ])
     .run(tauri::generate_context!())

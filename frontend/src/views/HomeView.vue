@@ -43,7 +43,7 @@
 
           <n-spin :show="recLoading">
             <div v-if="!recLoading && recError" class="rec-state">
-              {{ recError }}<span class="rec-retry" @click="loadRecommend">点击重试</span>
+              {{ recError }}<span class="rec-retry" @click="loadRecommend(true)">点击重试</span>
             </div>
             <div v-else-if="!recLoading && !recPlaylists.length" class="rec-state">
               暂无内容
@@ -175,6 +175,7 @@ import {
   type Playlist as ApiPlaylist,
 } from '@/api'
 import LoginModal from '@/components/LoginModal.vue'
+import { getCached, cachePeek, CACHE_TTL } from '@/utils/cache'
 
 const router = useRouter()
 
@@ -257,14 +258,29 @@ const recPlaylists = ref<ApiPlaylist[]>([])
 const recLoading = ref(false)
 const recError = ref('')
 
-async function loadRecommend() {
-  recLoading.value = true
+/** 首页发现音乐缓存键：按平台 + 分类区分 */
+function recCacheKey(): string {
+  return `home:${activeRecTab.value}:${activeCategory.value}`
+}
+
+async function loadRecommend(force = false) {
+  const key = recCacheKey()
   recError.value = ''
+  if (!force) {
+    // 内存缓存命中：直接秒显，不显示 loading
+    const hit = cachePeek<ApiPlaylist[]>(key, CACHE_TTL.home)
+    if (hit) {
+      recPlaylists.value = hit
+      return
+    }
+  }
+  recLoading.value = true
   try {
-    recPlaylists.value = await getCategoryPlaylists(
-      activeRecTab.value,
-      activeCategory.value,
-      10,
+    recPlaylists.value = await getCached(
+      key,
+      () => getCategoryPlaylists(activeRecTab.value, activeCategory.value, 10),
+      CACHE_TTL.home,
+      force,
     )
   } catch (e) {
     recError.value = '内容加载失败'
@@ -319,8 +335,6 @@ function openPlaylist(p: ApiPlaylist) {
     query: { source: p.source },
   })
 }
-
-onMounted(loadRecommend)
 
 /* ---------- 登录弹窗 ---------- */
 

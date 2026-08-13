@@ -87,16 +87,23 @@
 
 <style scoped>
 .player-bar {
+  /* 注意：必须用 fixed 而非 absolute —— DefaultLayout 为让详情页 sticky
+     头部生效，已把内层主内容区 overflow 改为 visible（滚动发生在最外层
+     容器），若用 absolute 会相对整个内容高度定位，滚动时播放器跟着滚走。 */
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 100;
-  /* 透明毛玻璃：背景完全透明，只保留模糊 */
-  background: transparent !important;
-  backdrop-filter: blur(24px) saturate(1.8);
-  -webkit-backdrop-filter: blur(24px) saturate(1.8);
+  /* 半透明纯色背景代替毛玻璃：fixed 元素若用 backdrop-filter，
+     滚动/路由切换时 WebView2 每帧重采样全宽背景，交互极卡。
+     半透明色视觉接近毛玻璃且零重采样开销 */
+  background: rgba(255, 255, 255, 0.92) !important;
   box-shadow: 0 -1px 0 rgba(0, 0, 0, 0.08);
 }
 html.dark .player-bar {
-  /* 暗色：完全透明 + 淡紫顶描边 */
-  background: transparent !important;
+  /* 暗色：深色半透明 + 淡紫顶描边 */
+  background: rgba(28, 28, 34, 0.92) !important;
   box-shadow: 0 -1px 0 color-mix(in srgb, var(--accent-light) 35%, transparent);
 }
 
@@ -206,8 +213,15 @@ html.dark .player-bar {
   transition: color 0.2s, transform 0.2s;
 }
 
-.ctrl-btn:hover {
-  color: var(--n-text-color);
+/* 点击后按钮保留焦点，naive-ui :focus 会套用主题色（按下后颜色不恢复），
+   !important 压过 naive-ui 规则恢复常态色；悬停规则在后，悬停时正常高亮 */
+.ctrl-btn:focus {
+  color: var(--n-text-color-3) !important;
+}
+
+.ctrl-btn:hover,
+.ctrl-btn:focus:hover {
+  color: var(--n-text-color) !important;
   transform: scale(1.08);
 }
 

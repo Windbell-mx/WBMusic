@@ -137,6 +137,13 @@
       :mask-closable="false"
     >
       <n-form ref="formRef" :model="formModel" :rules="formRules" label-placement="top">
+        <n-form-item label="所属平台" path="source">
+          <n-select
+            v-model:value="formModel.source"
+            :options="platformOptions"
+            placeholder="选择要创建的平台"
+          />
+        </n-form-item>
         <n-form-item label="歌单名称" path="name">
           <n-input
             v-model:value="formModel.name"
@@ -159,7 +166,9 @@
       <template #footer>
         <n-space justify="end">
           <n-button secondary @click="showCreateModal = false">取消</n-button>
-          <n-button type="primary" @click="handleCreate">创建</n-button>
+          <n-button type="primary" :loading="creating" @click="handleCreate">
+            创建
+          </n-button>
         </n-space>
       </template>
     </n-modal>
@@ -173,6 +182,7 @@ import {
   NIcon,
   NButton,
   NInput,
+  NSelect,
   NImage,
   NTag,
   NGrid,
@@ -196,9 +206,11 @@ import {
 import {
   getUserPlaylists,
   getLoginStatus,
+  createPlaylist,
   type Playlist as ApiPlaylist,
   type MusicSource,
 } from '@/api'
+import { getCached, cachePeek, invalidateCache, CACHE_TTL } from '@/utils/cache'
 
 const router = useRouter()
 const message = useMessage()
@@ -213,6 +225,8 @@ const playlists = ref<ApiPlaylist[]>([])
 const loading = ref(false)
 const anyLoggedIn = ref(false)
 const userNickname = ref('')
+/** 已登录的音乐源列表（用于创建歌单时默认选中） */
+const loggedInSources = ref<MusicSource[]>([])
 
 const searchQuery = ref('')
 const activeCategory = ref('all')
@@ -286,7 +300,17 @@ function resetFilters() {
   activeCategory.value = 'all'
 }
 
-async function loadPlaylists() {
+/** 我的歌单缓存键 */
+const PLAYLIST_CACHE_KEY = 'playlist:mine'
+
+async function loadPlaylists(force = false) {
+  // 内存缓存命中：直接秒显，不显示 loading
+  if (!force) {
+    const hit = cachePeek<ApiPlaylist[]>(PLAYLIST_CACHE_KEY, CACHE_TTL.playlist)
+    if (hit) {
+      playlists.value = hit
+    }
+  }
   loading.value = true
   try {
     // 登录状态
@@ -295,26 +319,37 @@ async function loadPlaylists() {
       statuses.netease?.logged_in || statuses.qq_music?.logged_in || false
     userNickname.value =
       statuses.netease?.nickname || statuses.qq_music?.nickname || ''
+    loggedInSources.value = [
+      ...(statuses.netease?.logged_in ? (['netease'] as MusicSource[]) : []),
+      ...(statuses.qq_music?.logged_in ? (['qq_music'] as MusicSource[]) : []),
+    ]
 
-    // 加载已登录平台的歌单
-    const all: ApiPlaylist[] = []
-    if (statuses.netease?.logged_in) {
-      try {
-        const list = await getUserPlaylists('netease')
-        all.push(...list)
-      } catch (e) {
-        console.warn('加载网易云歌单失败:', e)
-      }
-    }
-    if (statuses.qq_music?.logged_in) {
-      try {
-        const list = await getUserPlaylists('qq_music')
-        all.push(...list)
-      } catch (e) {
-        console.warn('加载 QQ 音乐歌单失败:', e)
-      }
-    }
-    playlists.value = all
+    // 加载已登录平台的歌单（走缓存）
+    playlists.value = await getCached(
+      PLAYLIST_CACHE_KEY,
+      async () => {
+        const all: ApiPlaylist[] = []
+        if (statuses.netease?.logged_in) {
+          try {
+            const list = await getUserPlaylists('netease')
+            all.push(...list)
+          } catch (e) {
+            console.warn('加载网易云歌单失败:', e)
+          }
+        }
+        if (statuses.qq_music?.logged_in) {
+          try {
+            const list = await getUserPlaylists('qq_music')
+            all.push(...list)
+          } catch (e) {
+            console.warn('加载 QQ 音乐歌单失败:', e)
+          }
+        }
+        return all
+      },
+      CACHE_TTL.playlist,
+      force,
+    )
   } finally {
     loading.value = false
   }
@@ -323,18 +358,37 @@ async function loadPlaylists() {
 onMounted(() => {
   loadPlaylists()
   // 窗口重新聚焦时自动刷新（如从登录弹窗/设置页返回后，或调试时切回应用）
-  window.addEventListener('focus', loadPlaylists)
+  // 强制刷新，保证登录状态变化后歌单是最新的
+  window.addEventListener('focus', () => loadPlaylists(true))
 })
 
-/* ---------- 新建歌单（本地占位，标注来源） ---------- */
+/* ---------- 新建歌单（真实创建到所选平台） ---------- */
 const showCreateModal = ref(false)
+const creating = ref(false)
 const formRef = ref<FormInst | null>(null)
-const formModel = ref({
+
+/** 所属平台选项 */
+const platformOptions = [
+  { label: '网易云', value: 'netease' },
+  { label: 'QQ 音乐', value: 'qq_music' },
+]
+
+const formModel = ref<{
+  name: string
+  description: string
+  source: MusicSource
+}>({
   name: '',
   description: '',
+  source: 'netease',
 })
 
 const formRules: FormRules = {
+  source: {
+    required: true,
+    message: '请选择所属平台',
+    trigger: ['change'],
+  },
   name: {
     required: true,
     message: '请输入歌单名称',
@@ -343,26 +397,39 @@ const formRules: FormRules = {
 }
 
 function openCreateModal() {
-  formModel.value = { name: '', description: '' }
+  formModel.value = {
+    name: '',
+    description: '',
+    // 默认选中第一个已登录的平台；都未登录时默认网易云
+    source: loggedInSources.value[0] || 'netease',
+  }
   showCreateModal.value = true
 }
 
-function handleCreate() {
-  formRef.value?.validate((errors) => {
-    if (errors) return
-    playlists.value.unshift({
-      id: `local-${Date.now()}`,
-      name: formModel.value.name,
-      description: formModel.value.description || '暂无描述',
-      cover_url: `https://picsum.photos/seed/playlist${Date.now()}/400/400`,
-      track_count: 0,
-      play_count: 0,
-      source: 'netease',
-    })
+async function handleCreate() {
+  try {
+    await formRef.value?.validate()
+  } catch {
+    return
+  }
+  creating.value = true
+  try {
+    const created = await createPlaylist(
+      formModel.value.source,
+      formModel.value.name.trim(),
+      formModel.value.description.trim() || undefined,
+    )
+    playlists.value.unshift(created)
+    // 新建后使缓存失效，避免旧缓存覆盖新歌单
+    invalidateCache(PLAYLIST_CACHE_KEY)
     showCreateModal.value = false
     activeCategory.value = 'all'
-    message.success(`歌单「${formModel.value.name}」创建成功（本地）`)
-  })
+    message.success(`歌单「${created.name}」创建成功`)
+  } catch (e) {
+    message.error(typeof e === 'string' ? e : `创建失败：${e}`)
+  } finally {
+    creating.value = false
+  }
 }
 </script>
 

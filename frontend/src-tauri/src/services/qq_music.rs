@@ -481,49 +481,260 @@ impl QqMusicProvider {
             "Content-Type",
             HeaderValue::from_static("application/json"),
         );
-        // 分页拉取全部歌曲：每次 song_num 首，直到不足一页或达到总数
-        let mut dirinfo: Value = Value::Null;
+        // 分页拉取全部歌曲：先拉第一页拿到总数，剩余页并发拉取。
+        // 歌单歌曲多时（如 1000+ 首）避免串行分页等待造成卡顿
+        const PAGE: i64 = 200;
+        let dirinfo: Value;
         let mut tracks: Vec<Track> = Vec::new();
+
+        // 构造 comm（是否"我喜欢"歌单决定登录态）
+        let comm = if is_liked {
+            json!({
+                "uin": session_uin.parse::<i64>().unwrap_or(0),
+                "ct": "20",
+                "cv": "13020508",
+                "tmeAppID": "qqmusic",
+                "format": "json",
+                "authst": session_key,
+            })
+        } else {
+            json!({
+                "cv": 13020508,
+                "ct": 24,
+                "format": "json",
+                "inCharset": "utf-8",
+                "outCharset": "utf-8",
+                "notice": 0,
+                "platform": "yqq.json",
+                "needNewCode": 1,
+                "uin": "0",
+                "g_tk": 5381,
+            })
+        };
+
+        // 第一页：串行请求，拿到 dirinfo + 总数
+        let first = Self::fetch_diss_page(
+            &self.client,
+            &comm,
+            playlist_id,
+            is_liked,
+            &session_uin,
+            0,
+            PAGE,
+        )
+        .await?;
+        dirinfo = first.0;
+        tracks.extend(first.1);
+        let total_hint = first.2;
+
+        if let Some(total) = total_hint {
+            // 已知总数：并发拉取剩余页，按 begin 顺序合并
+            let mut set = tokio::task::JoinSet::new();
+            let mut begin = tracks.len() as i64;
+            while begin < total as i64 {
+                let client = self.client.clone();
+                let comm = comm.clone();
+                let pid = playlist_id.to_string();
+                let uin = session_uin.clone();
+                set.spawn(async move {
+                    let page = Self::fetch_diss_page(
+                        &client, &comm, &pid, is_liked, &uin, begin, PAGE,
+                    )
+                    .await?;
+                    Ok::<(i64, Vec<Track>), String>((begin, page.1))
+                });
+                begin += PAGE;
+            }
+            let mut pages: Vec<(i64, Vec<Track>)> = Vec::new();
+            while let Some(res) = set.join_next().await {
+                let (b, batch) = res.map_err(|e| format!("歌单分页任务失败: {}", e))??;
+                pages.push((b, batch));
+            }
+            pages.sort_by_key(|(b, _)| *b);
+            for (_, batch) in pages {
+                tracks.extend(batch);
+            }
+        } else {
+            // 无总数信息：退化为串行分页（少见场景）
+            let mut begin = tracks.len() as i64;
+            loop {
+                let page = Self::fetch_diss_page(
+                    &self.client,
+                    &comm,
+                    playlist_id,
+                    is_liked,
+                    &session_uin,
+                    begin,
+                    PAGE,
+                )
+                .await?;
+                let batch = page.1;
+                let fetched = batch.len() as i64;
+                tracks.extend(batch);
+                if fetched < PAGE {
+                    break;
+                }
+                begin += fetched;
+                if let Some(t) = page.2 {
+                    if tracks.len() as u64 >= t {
+                        break;
+                    }
+                }
+            }
+        }
+        let cover_url = dirinfo["picurl"]
+            .as_str()
+            .map(|s| s.replace("http://", "https://"));
+        Ok(PlaylistDetail {
+            id: playlist_id.to_string(),
+            name: dirinfo["title"].as_str().unwrap_or("未命名歌单").to_string(),
+            description: dirinfo["desc"].as_str().map(|s| s.to_string()),
+            cover_url,
+            track_count: tracks.len() as u32,
+            tracks,
+        })
+    }
+
+    /// 拉取歌单某一页歌曲（供串行/并发分页共用）。
+    /// 返回 (dirinfo, 本页歌曲, 歌单总数 total_song_num)。
+    async fn fetch_diss_page(
+        client: &reqwest::Client,
+        comm: &Value,
+        playlist_id: &str,
+        is_liked: bool,
+        session_uin: &str,
+        begin: i64,
+        num: i64,
+    ) -> Result<(Value, Vec<Track>, Option<u64>), String> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Referer",
+            HeaderValue::from_static("https://y.qq.com/"),
+        );
+        headers.insert(
+            "Content-Type",
+            HeaderValue::from_static("application/json"),
+        );
+        let mut param = json!({
+            "disstid": playlist_id.parse::<i64>().unwrap_or(0),
+            "enc_host_uin": if is_liked { session_uin } else { "" },
+            "tag": 1,
+            "userinfo": 1,
+            "song_begin": begin,
+            "song_num": num,
+        });
+        // 关键："我喜欢"歌单必须同时带 dirid=201，否则返回空壳
+        if is_liked {
+            param["dirid"] = json!(201);
+            param["cmd"] = json!(127);
+        }
+        let body = json!({
+            "comm": comm,
+            "req_0": {
+                "module": "music.srfDissInfo.aiDissInfo",
+                "method": "uniform_get_Dissinfo",
+                "param": param,
+            },
+        });
+        let resp = client
+            .post("https://u.y.qq.com/cgi-bin/musicu.fcg")
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("获取歌单详情失败: {}", e))?;
+        let j: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析歌单详情失败: {}", e))?;
+        let info = &j["req_0"]["data"];
+        let code = info["subcode"].as_i64().unwrap_or(-1);
+        if code != 0 {
+            let msg = info["msg"].as_str().unwrap_or("未知错误");
+            return Err(format!("获取歌单详情失败: {}", msg));
+        }
+        let dirinfo = info["dirinfo"].clone();
+        let total = info["total_song_num"].as_u64();
+        let songs = info["songlist"].as_array().cloned().unwrap_or_default();
+        let batch: Vec<Track> = songs
+            .iter()
+            .map(|s| {
+                let mid = s["mid"].as_str().unwrap_or("").to_string();
+                let title = s["name"].as_str().unwrap_or("未知歌曲").to_string();
+                let artist = s["singer"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x["name"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    })
+                    .unwrap_or_default();
+                let album = s["album"]["name"].as_str().map(|x| x.to_string());
+                let duration = s["interval"].as_u64().map(|d| d as u32);
+                let album_mid = s["album"]["mid"].as_str().unwrap_or("");
+                let cover_url = if album_mid.is_empty() {
+                    None
+                } else {
+                    Some(format!(
+                        "https://y.gtimg.cn/music/photo_new/T002R800x800M000{}.jpg",
+                        album_mid
+                    ))
+                };
+                Track {
+                    id: mid,
+                    title,
+                    artist,
+                    album,
+                    duration,
+                    cover_url,
+                    source: MusicProviderKind::QqMusic,
+                }
+            })
+            .collect();
+        Ok((dirinfo, batch, total))
+    }
+
+    /// 轻量版「我喜欢」歌曲 ID 拉取：分页只提取 songlist 的 mid，
+    /// 不构建完整 Track（封面 URL 拼接等），比 fetch_playlist_detail 快很多。
+    /// dirid=201 为「我喜欢」歌单，未登录会报错。
+    async fn fetch_liked_track_ids(&self) -> Result<Vec<String>, String> {
+        let (session_uin, session_key) = self.session_cred()?;
+        if session_key.is_empty() {
+            return Err("请先登录 QQ 音乐".into());
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Referer",
+            HeaderValue::from_static("https://y.qq.com/"),
+        );
+        headers.insert(
+            "Content-Type",
+            HeaderValue::from_static("application/json"),
+        );
+        let comm = json!({
+            "uin": session_uin.parse::<i64>().unwrap_or(0),
+            "ct": "20",
+            "cv": "13020508",
+            "tmeAppID": "qqmusic",
+            "format": "json",
+            "authst": session_key,
+        });
+        let mut ids: Vec<String> = Vec::new();
         let mut begin: i64 = 0;
         const PAGE: i64 = 200;
         loop {
-            // 常规歌单用匿名 comm；"我喜欢"歌单用登录态 comm（uin + authst）
-            let comm = if is_liked {
-                json!({
-                    "uin": session_uin.parse::<i64>().unwrap_or(0),
-                    "ct": "20",
-                    "cv": "13020508",
-                    "tmeAppID": "qqmusic",
-                    "format": "json",
-                    "authst": session_key,
-                })
-            } else {
-                json!({
-                    "cv": 13020508,
-                    "ct": 24,
-                    "format": "json",
-                    "inCharset": "utf-8",
-                    "outCharset": "utf-8",
-                    "notice": 0,
-                    "platform": "yqq.json",
-                    "needNewCode": 1,
-                    "uin": "0",
-                    "g_tk": 5381,
-                })
-            };
             let mut param = json!({
-                "disstid": playlist_id.parse::<i64>().unwrap_or(0),
-                "enc_host_uin": if is_liked { session_uin.as_str() } else { "" },
+                "disstid": 201,
+                "enc_host_uin": session_uin.as_str(),
                 "tag": 1,
                 "userinfo": 1,
                 "song_begin": begin,
                 "song_num": PAGE,
             });
-            // 关键："我喜欢"歌单必须同时带 dirid=201，否则返回空壳
-            if is_liked {
-                param["dirid"] = json!(201);
-                param["cmd"] = json!(127);
-            }
+            // 「我喜欢」歌单必须带 dirid=201 与 cmd=127，否则返回空壳
+            param["dirid"] = json!(201);
+            param["cmd"] = json!(127);
             let body = json!({
                 "comm": comm,
                 "req_0": {
@@ -539,59 +750,25 @@ impl QqMusicProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("获取歌单详情失败: {}", e))?;
+                .map_err(|e| format!("获取「我喜欢」歌曲列表失败: {}", e))?;
             let j: Value = resp
                 .json()
                 .await
-                .map_err(|e| format!("解析歌单详情失败: {}", e))?;
+                .map_err(|e| format!("解析「我喜欢」歌曲列表失败: {}", e))?;
             let info = &j["req_0"]["data"];
-            let code = info["subcode"].as_i64().unwrap_or(-1);
-            if code != 0 {
-                let msg = info["msg"].as_str().unwrap_or("未知错误");
-                return Err(format!("获取歌单详情失败: {}", msg));
-            }
-            if dirinfo.is_null() {
-                dirinfo = info["dirinfo"].clone();
+            if info["subcode"].as_i64().unwrap_or(-1) != 0 {
+                return Err(format!(
+                    "获取「我喜欢」歌曲列表失败: {}",
+                    info["msg"].as_str().unwrap_or("未知错误")
+                ));
             }
             let total = info["total_song_num"].as_u64();
             let songs = info["songlist"].as_array().cloned().unwrap_or_default();
-            let batch: Vec<Track> = songs
-                .iter()
-                .map(|s| {
-                    let mid = s["mid"].as_str().unwrap_or("").to_string();
-                    let title = s["name"].as_str().unwrap_or("未知歌曲").to_string();
-                    let artist = s["singer"]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|x| x["name"].as_str())
-                                .collect::<Vec<_>>()
-                                .join("/")
-                        })
-                        .unwrap_or_default();
-                    let album = s["album"]["name"].as_str().map(|x| x.to_string());
-                    let duration = s["interval"].as_u64().map(|d| d as u32);
-                    let album_mid = s["album"]["mid"].as_str().unwrap_or("");
-                    let cover_url = if album_mid.is_empty() {
-                        None
-                    } else {
-                        Some(format!(
-                            "https://y.gtimg.cn/music/photo_new/T002R800x800M000{}.jpg",
-                            album_mid
-                        ))
-                    };
-                    Track {
-                        id: mid,
-                        title,
-                        artist,
-                        album,
-                        duration,
-                        cover_url,
-                        source: MusicProviderKind::QqMusic,
-                    }
-                })
-                .collect();
-            tracks.extend(batch);
+            for s in &songs {
+                if let Some(mid) = s["mid"].as_str() {
+                    ids.push(mid.to_string());
+                }
+            }
             // 判断是否还有下一页
             let fetched = songs.len() as i64;
             if fetched < PAGE {
@@ -599,22 +776,12 @@ impl QqMusicProvider {
             }
             begin += fetched;
             if let Some(t) = total {
-                if tracks.len() as u64 >= t {
+                if ids.len() as u64 >= t {
                     break;
                 }
             }
         }
-        let cover_url = dirinfo["picurl"]
-            .as_str()
-            .map(|s| s.replace("http://", "https://"));
-        Ok(PlaylistDetail {
-            id: playlist_id.to_string(),
-            name: dirinfo["title"].as_str().unwrap_or("未命名歌单").to_string(),
-            description: dirinfo["desc"].as_str().map(|s| s.to_string()),
-            cover_url,
-            track_count: tracks.len() as u32,
-            tracks,
-        })
+        Ok(ids)
     }
 
     /// 获取排行榜详情（匿名可用，无需登录）
@@ -704,45 +871,60 @@ impl QqMusicProvider {
             .collect();
         let mut mid_map: HashMap<i64, Value> = HashMap::new();
         // 注意：musicu.fcg 单请求内 req 块过多会返回 code=500000（实测 50 个失败、20 个成功）
+        // 并发执行各批次，排行榜歌曲多时避免串行等待造成卡顿
+        let client = self.client.clone();
+        let mut set = tokio::task::JoinSet::new();
         for chunk in song_ids.chunks(20) {
-            let mut body = json!({
-                "comm": {
-                    "cv": 4747474,
-                    "ct": 24,
-                    "format": "json",
-                    "inCharset": "utf-8",
-                    "outCharset": "utf-8",
-                    "notice": 0,
-                    "platform": "yqq.json",
-                    "needNewCode": 1,
-                    "uin": "0",
-                    "g_tk": 5381,
-                }
-            });
-            for (i, id) in chunk.iter().enumerate() {
-                body[format!("req_{}", i)] = json!({
-                    "module": "music.pf_song_detail_svr",
-                    "method": "get_song_detail_yqq",
-                    "param": { "song_id": *id, "song_type": 0 },
+            let client = client.clone();
+            let headers = headers.clone();
+            let ids: Vec<i64> = chunk.to_vec();
+            set.spawn(async move {
+                let mut body = json!({
+                    "comm": {
+                        "cv": 4747474,
+                        "ct": 24,
+                        "format": "json",
+                        "inCharset": "utf-8",
+                        "outCharset": "utf-8",
+                        "notice": 0,
+                        "platform": "yqq.json",
+                        "needNewCode": 1,
+                        "uin": "0",
+                        "g_tk": 5381,
+                    }
                 });
-            }
-            let resp = self
-                .client
-                .post("https://u.y.qq.com/cgi-bin/musicu.fcg")
-                .headers(headers.clone())
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format!("获取歌曲信息失败: {}", e))?;
-            let j: Value = resp
-                .json()
-                .await
-                .map_err(|e| format!("解析歌曲信息失败: {}", e))?;
-            for (i, id) in chunk.iter().enumerate() {
-                let ti = &j[format!("req_{}", i)]["data"]["track_info"];
-                if !ti.is_null() {
-                    mid_map.insert(*id, ti.clone());
+                for (i, id) in ids.iter().enumerate() {
+                    body[format!("req_{}", i)] = json!({
+                        "module": "music.pf_song_detail_svr",
+                        "method": "get_song_detail_yqq",
+                        "param": { "song_id": *id, "song_type": 0 },
+                    });
                 }
+                let resp = client
+                    .post("https://u.y.qq.com/cgi-bin/musicu.fcg")
+                    .headers(headers)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| format!("获取歌曲信息失败: {}", e))?;
+                let j: Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("解析歌曲信息失败: {}", e))?;
+                let mut batch: Vec<(i64, Value)> = Vec::new();
+                for (i, id) in ids.iter().enumerate() {
+                    let ti = &j[format!("req_{}", i)]["data"]["track_info"];
+                    if !ti.is_null() {
+                        batch.push((*id, ti.clone()));
+                    }
+                }
+                Ok::<Vec<(i64, Value)>, String>(batch)
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            let batch = res.map_err(|e| format!("歌曲信息任务失败: {}", e))??;
+            for (id, ti) in batch {
+                mid_map.insert(id, ti);
             }
         }
         // ---------- 第三步：组装歌曲列表 ----------
@@ -1454,6 +1636,76 @@ impl MusicProvider for QqMusicProvider {
             ));
         }
         Ok(())
+    }
+
+    async fn get_liked_track_ids(&self) -> Result<Vec<String>, String> {
+        // dirid=201 即「我喜欢」歌单；用轻量分页只提取 mid，未登录会直接报错。
+        self.fetch_liked_track_ids().await
+    }
+
+    async fn create_playlist(&self, name: &str, description: Option<&str>) -> Result<Playlist, String> {
+        // 需登录（解析到 uin + key），未登录直接报错
+        let (uin, key) = self.session_cred()?;
+        if key.is_empty() {
+            return Err("请先登录 QQ 音乐".into());
+        }
+        let gtk = super::qq_enc::g_tk(&key);
+
+        // 网页版创建歌单接口（c.y.qq.com rsc），需带登录 Cookie 与 g_tk
+        let cookie = format!("uin={}; qqmusic_key={}; qm_keyst={}", uin, key, key);
+        let url = format!(
+            "https://c.y.qq.com/rsc/fcgi-bin/fcg_ucc_createcdir.fcg?ct=20&uin={}&g_tk={}&loginUin=0&hostUin=0&format=json&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq.json&needNewCode=0",
+            uin, gtk
+        );
+        let resp = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("Referer", "https://y.qq.com/")
+            .header("Origin", "https://y.qq.com")
+            .header("Cookie", cookie)
+            .form(&[
+                ("optype", "1"),
+                ("dirid", "201"),
+                ("diss_name", name),
+                ("diss_des", description.unwrap_or("")),
+                ("pic", ""),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("创建歌单请求失败: {}", e))?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取创建歌单响应失败: {}", e))?;
+
+        // 响应可能是 JSON 或 JSONP 包裹（MusicJsonCallback({...})），统一提取大括号内容
+        let json_start = text.find('{').ok_or_else(|| "创建歌单响应格式异常".to_string())?;
+        let json_end = text.rfind('}').ok_or_else(|| "创建歌单响应格式异常".to_string())?;
+        let json_str = &text[json_start..json_end + 1];
+        let j: Value = serde_json::from_str(json_str)
+            .map_err(|e| format!("解析创建歌单响应失败: {}", e))?;
+
+        let code = j["code"].as_i64().unwrap_or(-1);
+        if code != 0 {
+            return Err(format!(
+                "创建歌单失败 (code={})：登录态可能已失效，请重新登录 QQ 音乐",
+                code
+            ));
+        }
+        let dir_id = j["data"]["dirid"].as_i64().unwrap_or(0).to_string();
+        if dir_id == "0" {
+            return Err("创建歌单失败：未返回歌单 ID".into());
+        }
+        Ok(Playlist {
+            id: dir_id,
+            name: j["data"]["diss_name"].as_str().unwrap_or(name).to_string(),
+            description: description.map(|s| s.to_string()).filter(|s| !s.is_empty()),
+            cover_url: None,
+            track_count: 0,
+            play_count: 0,
+            source: self.kind,
+        })
     }
 }
 

@@ -1,9 +1,9 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import NaiveUI from 'naive-ui'
 import App from './App.vue'
 import router from './router'
 import { isTauri } from './api'
+import { useShortcutStore } from './stores/shortcuts'
 import './style.css'
 
 // 桌面应用内禁用 WebView2 默认右键菜单（"检查/刷新/另存为"等浏览器菜单）
@@ -24,6 +24,9 @@ const app = createApp(App)
 
 app.use(createPinia())
 app.use(router)
-app.use(NaiveUI)
+// naive-ui 组件已由 unplugin-vue-components 按需自动引入，无需全量注册
+
+// 初始化全局快捷键（注册 window keydown 监听；即使从未打开设置页也生效）
+useShortcutStore()
 
 app.mount('#app')

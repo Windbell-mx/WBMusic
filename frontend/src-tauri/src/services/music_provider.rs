@@ -145,4 +145,10 @@ pub trait MusicProvider: Send + Sync {
 
     /// 收藏/取消收藏歌曲（红心）。`like=true` 收藏到平台默认喜欢歌单，`false` 取消
     async fn like_track(&self, track_id: &str, like: bool) -> Result<(), String>;
+
+    /// 获取当前用户已收藏（红心）的歌曲 ID 列表（需登录）
+    async fn get_liked_track_ids(&self) -> Result<Vec<String>, String>;
+
+    /// 在平台创建歌单。返回新创建的歌单信息（id 为平台真实歌单 id）
+    async fn create_playlist(&self, name: &str, description: Option<&str>) -> Result<Playlist, String>;
 }

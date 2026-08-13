@@ -1,6 +1,14 @@
 ﻿<template>
-  <!-- 标题栏高度 36px，布局从其下方开始 -->
-  <n-layout has-sider style="height: calc(100vh - 36px); margin-top: 36px">
+  <!-- 标题栏高度 36px，布局从其下方开始。
+       非播放路由时底部有 84px 高的播放器（fixed 悬浮），把滚动容器高度同步
+       减掉 84px，滚动条轨道就在播放器上方结束，不再与其重合。 -->
+  <n-layout
+    has-sider
+    :style="{
+      height: isPlayerRoute ? 'calc(100vh - 36px)' : 'calc(100vh - 120px)',
+      marginTop: '36px',
+    }"
+  >
     <!-- 侧边栏导航 -->
     <n-layout-sider
       bordered
@@ -60,10 +68,10 @@
       @changed="refreshProviderStatus"
     />
 
-    <!-- 主内容区 -->
-    <n-layout style="position: relative">
+    <!-- 主内容区：滚动容器高度已减掉播放器高度，底部无需再预留 80px -->
+    <n-layout class="main-content-layout" style="position: relative">
       <n-layout-content
-        style="padding: 24px 24px 80px"
+        style="padding: 16px 24px 24px"
         content-style="background: var(--n-color);"
       >
         <!-- 内容区：最大化窗口下充分利用宽度（首页内部自适应两栏） -->
@@ -79,7 +87,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, ref, watch } from 'vue'
+import { computed, h, nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   NLayout,
@@ -135,6 +143,30 @@ watch(
   () => refreshProviderStatus(),
 )
 
+// 路由切换后，将主内容滚动容器重置到顶部。
+// 原因：详情页/列表页共用同一个外层滚动容器，若不重置，
+// 从详情页返回列表页时列表仍停留在原滚动位置（"退到外边也在下面"）。
+watch(
+  () => route.fullPath,
+  async () => {
+    await nextTick()
+    const pc = document.querySelector('.page-container')
+    if (!pc) return
+    let el: HTMLElement | null = pc.parentElement
+    while (el) {
+      const cs = getComputedStyle(el)
+      if (
+        (cs.overflowY === 'auto' || cs.overflowY === 'scroll') &&
+        el.scrollHeight > el.clientHeight + 5
+      ) {
+        el.scrollTop = 0
+        break
+      }
+      el = el.parentElement
+    }
+  },
+)
+
 // 登录弹窗
 const showLoginModal = ref(false)
 const loginTarget = ref<{ key: MusicSource; label: string } | null>(null)
@@ -179,18 +211,23 @@ function handleLogoClick() {
 </script>
 
 <style scoped>
-/* ---------- 侧边栏毛玻璃（透明） ---------- */
+/* ---------- 侧边栏半透明背景（去掉毛玻璃，防滚动/切换卡顿） ---------- */
 .sidebar-glass {
-  /* 透明毛玻璃：背景完全透明，只保留模糊 */
-  background: transparent !important;
-  backdrop-filter: blur(24px) saturate(1.8);
-  -webkit-backdrop-filter: blur(24px) saturate(1.8);
+  /* 大面 backdrop-filter 在 WebView2 滚动/路由切换时每帧重采样背景，
+     交互极卡。改用半透明纯色，视觉接近毛玻璃且零重采样开销 */
+  background: rgba(255, 255, 255, 0.92) !important;
   box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.08);
+
+  /* has-sider 模式下 sider 静态定位在滚动容器内，会跟着主内容一起滚动。
+     sticky + top:0 让它相对外层滚动容器固定，侧边栏始终保持不动 */
+  position: sticky !important;
+  top: 0;
+  align-self: flex-start;
 }
 
 html.dark .sidebar-glass {
-  /* 暗色：完全透明 + 淡紫右描边 */
-  background: transparent !important;
+  /* 暗色：深色半透明 + 淡紫右描边 */
+  background: rgba(28, 28, 34, 0.92) !important;
   box-shadow: inset -1px 0 0 color-mix(in srgb, var(--accent-light) 35%, transparent);
 }
 
@@ -199,6 +236,16 @@ html.dark .sidebar-glass {
   max-width: 1800px;
   margin: 0 auto;
   width: 100%;
+}
+
+/* 关键：内层主内容布局及其 scroll container 默认 overflow: hidden/auto，
+   会成为子页面 sticky 元素的“最近滚动祖先”但并不真正滚动，
+   导致详情页返回按钮无法冻结在顶部。改为 overflow: visible，
+   让 sticky 直接相对外层真实滚动容器生效。 */
+.main-content-layout,
+.main-content-layout :deep(.n-layout-scroll-container),
+.main-content-layout :deep(.n-layout-content) {
+  overflow: visible;
 }
 
 /* ---------- 侧边栏头部 ---------- */

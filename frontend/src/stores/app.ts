@@ -28,6 +28,17 @@ export const useAppStore = defineStore('app', () => {
   /** 缓存路径：Tauri 环境下为完整绝对路径；浏览器降级为相对路径 */
   const cachePath = ref('WBMusic/cache')
 
+  /** 缓存上限（GB）。默认 1 GB，持久化到 localStorage（key: wbmusic.cacheLimitGB） */
+  function initCacheLimitGB(): number {
+    const stored = localStorage.getItem('wbmusic.cacheLimitGB')
+    if (stored !== null && Number(stored) > 0) return Number(stored)
+    // 迁移旧版「wbmusic.cacheLimit」（MB 单位）的值
+    const oldMb = Number(localStorage.getItem('wbmusic.cacheLimit'))
+    if (oldMb > 0) return Math.round((oldMb / 1024) * 10) / 10
+    return 1
+  }
+  const cacheLimitGB = ref<number>(initCacheLimitGB())
+
   /** 全局刷新计数器：每次全局刷新 +1，router-view :key 绑定它即可强制重挂载当前页面 */
   const refreshKey = ref(0)
 
@@ -125,6 +136,13 @@ export const useAppStore = defineStore('app', () => {
     localStorage.setItem('wbmusic.cachePath', path)
   }
 
+  /** 设置缓存上限（GB），持久化 */
+  function setCacheLimitGB(gb: number) {
+    cacheLimitGB.value = gb
+    localStorage.setItem('wbmusic.cacheLimitGB', String(gb))
+    localStorage.removeItem('wbmusic.cacheLimit')
+  }
+
   // ---- 设置项持久化：任何改动（含组件直接赋值）统一落盘 ----
   watch([themeColor, sidebarCollapsed, autoPlay, showLyrics], ([c, s, a, l]) => {
     localStorage.setItem('wbmusic.themeColor', c)
@@ -144,6 +162,7 @@ export const useAppStore = defineStore('app', () => {
     autoPlay,
     showLyrics,
     cachePath,
+    cacheLimitGB,
     refreshKey,
     triggerRefresh,
     toggleTheme,
@@ -152,6 +171,7 @@ export const useAppStore = defineStore('app', () => {
     setThemeColor,
     toggleSidebar,
     setCachePath,
+    setCacheLimitGB,
     initCachePath,
   }
 })
