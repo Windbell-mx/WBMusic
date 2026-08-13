@@ -5,10 +5,19 @@ import { getCacheDir, isTauri } from '@/api'
 /** 主题模式：system 跟随系统 / light 固定浅色 / dark 固定深色 */
 export type ThemeMode = 'system' | 'light' | 'dark'
 
+/** 渲染质量：quality 质量优先（毛玻璃/光晕/动画全开）/ performance 性能优先（全部关闭，降低 GPU 与内存占用） */
+export type RenderQuality = 'quality' | 'performance'
+
 const THEME_MODE_KEY = 'wbmusic.themeMode'
+const RENDER_QUALITY_KEY = 'wbmusic.renderQuality'
 
 function applyDarkClass(isDark: boolean) {
   document.documentElement.classList.toggle('dark', isDark)
+}
+
+/** 性能模式：给 <html> 挂 perf-mode class，全局 CSS 统一关闭毛玻璃/模糊/动画 */
+function applyPerfClass(isPerf: boolean) {
+  document.documentElement.classList.toggle('perf-mode', isPerf)
 }
 
 export const useAppStore = defineStore('app', () => {
@@ -18,6 +27,18 @@ export const useAppStore = defineStore('app', () => {
   const sidebarCollapsed = ref(localStorage.getItem('wbmusic.sidebarCollapsed') === '1')
   const autoPlay = ref(localStorage.getItem('wbmusic.autoPlay') !== '0')
   const showLyrics = ref(localStorage.getItem('wbmusic.showLyrics') !== '0')
+
+  /** 渲染质量：quality 质量优先 / performance 性能优先（localStorage 持久化） */
+  const renderQuality = ref<RenderQuality>(
+    localStorage.getItem(RENDER_QUALITY_KEY) === 'performance' ? 'performance' : 'quality',
+  )
+
+  /** 设置渲染质量并应用 perf-mode class */
+  function setRenderQuality(q: RenderQuality) {
+    renderQuality.value = q
+    localStorage.setItem(RENDER_QUALITY_KEY, q)
+    applyPerfClass(q === 'performance')
+  }
 
   /** 主题模式：跟随系统 / 浅色 / 深色（localStorage 持久化） */
   const themeMode = ref<ThemeMode>('system')
@@ -153,6 +174,8 @@ export const useAppStore = defineStore('app', () => {
 
   // 初始化主题模式（缓存路径已在定义处初始化）
   initThemeMode()
+  // 初始化渲染质量（挂 perf-mode class）
+  applyPerfClass(renderQuality.value === 'performance')
 
   return {
     isDark,
@@ -161,6 +184,8 @@ export const useAppStore = defineStore('app', () => {
     sidebarCollapsed,
     autoPlay,
     showLyrics,
+    renderQuality,
+    setRenderQuality,
     cachePath,
     cacheLimitGB,
     refreshKey,

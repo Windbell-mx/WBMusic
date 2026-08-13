@@ -1,18 +1,18 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "WBMusic",
+  "productName": "WBMusic-Lite",
   "version": "0.1.5",
   "identifier": "com.wbmusic.app",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://localhost:5174",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
   },
   "app": {
     "windows": [
       {
-        "title": "WBMusic",
+        "title": "WBMusic-Lite",
         "width": 1200,
         "height": 800,
         "minWidth": 960,
@@ -21,7 +21,8 @@
         "fullscreen": false,
         "center": true,
         "decorations": false,
-        "shadow": true
+        "shadow": true,
+        "additionalBrowserArgs": "--disable-gpu --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
       }
     ],
     "security": {

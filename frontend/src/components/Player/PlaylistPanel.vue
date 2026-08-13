@@ -138,6 +138,7 @@ function formatDuration(sec: number | null | undefined): string {
   display: flex;
   justify-content: flex-end;
   background: rgba(0, 0, 0, 0.35);
+  /* 全屏遮罩毛玻璃；性能模式（html.perf-mode）下由全局规则关闭 */
   backdrop-filter: blur(2px);
   -webkit-backdrop-filter: blur(2px);
 }

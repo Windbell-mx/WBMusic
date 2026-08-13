@@ -71,6 +71,19 @@
                   @update:value="handleSidebar"
                 />
               </div>
+
+              <n-divider style="margin: 4px 0" />
+
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-label">渲染质量</span>
+                  <span class="setting-desc">性能优先可关闭毛玻璃 / 光晕 / 动画，显著降低 GPU 与内存占用</span>
+                </div>
+                <n-radio-group v-model:value="renderQuality">
+                  <n-radio-button :value="'quality'">质量优先</n-radio-button>
+                  <n-radio-button :value="'performance'">性能优先</n-radio-button>
+                </n-radio-group>
+              </div>
             </n-space>
           </n-card>
         </section>
@@ -312,7 +325,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, type Component } from 'vue'
 import { useMessage } from 'naive-ui'
-import { useAppStore, type ThemeMode } from '@/stores/app'
+import { useAppStore, type ThemeMode, type RenderQuality } from '@/stores/app'
 import { usePlayerStore } from '@/stores/player'
 import {
   useShortcutStore,
@@ -361,6 +374,15 @@ function handleResetShortcuts() {
 const themeMode = computed<ThemeMode>({
   get: () => appStore.themeMode,
   set: (v) => appStore.setThemeMode(v),
+})
+
+/** 渲染质量：双向绑定 app store（持久化，切换后立即生效） */
+const renderQuality = computed<RenderQuality>({
+  get: () => appStore.renderQuality,
+  set: (v) => {
+    appStore.setRenderQuality(v)
+    message.success(v === 'performance' ? '已切换为性能优先，已关闭视觉效果' : '已切换为质量优先')
+  },
 })
 
 /** 默认播放模式：绑定真实播放器状态（持久化） */

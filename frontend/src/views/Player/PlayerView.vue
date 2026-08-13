@@ -478,6 +478,8 @@ onBeforeUnmount(() => {
 .bg-glow {
   position: absolute;
   border-radius: 50%;
+  /* 大半径高斯模糊营造光晕，GPU 开销大；
+     性能模式（html.perf-mode）下由全局规则关闭 */
   filter: blur(120px);
   opacity: 0.35;
   pointer-events: none;

@@ -553,7 +553,8 @@ function goSettings() {
   gap: 4px;
   padding: 4px;
   border-radius: 999px;
-  /* 浅色玻璃：纯白半透明底 + 顶部高光 + 柔和投影，仍通透 */
+  /* 浅色玻璃：纯白半透明底 + 顶部高光 + 柔和投影，仍通透。
+     毛玻璃在性能模式（html.perf-mode）下由全局规则关闭 */
   background: rgba(255, 255, 255, 0.45);
   backdrop-filter: blur(16px) saturate(1.8);
   -webkit-backdrop-filter: blur(16px) saturate(1.8);

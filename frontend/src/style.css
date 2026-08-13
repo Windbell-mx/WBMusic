@@ -345,3 +345,20 @@ code {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--n-text-color, #909399) 20%, transparent) transparent;
 }
+
+/* ================= 性能模式（html.perf-mode）=================
+   由 app store 的「渲染质量」开关控制：一键关闭所有高 GPU 开销效果。
+   优先级高于一切组件样式（!important），无需逐个组件改：
+   - backdrop-filter 毛玻璃（每帧重采样背景，最贵）
+   - filter 大半径模糊 / drop-shadow（bg-glow 等）
+   - 无限动画（唱片旋转、跑马灯、均衡器跳动、刷新旋转）
+   - transition 过渡（hover 高亮等，瞬时完成） */
+html.perf-mode *,
+html.perf-mode *::before,
+html.perf-mode *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none !important;
+  animation: none !important;
+  transition: none !important;
+}
