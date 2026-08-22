@@ -651,15 +651,37 @@ pub async fn open_qr_login(app: tauri::AppHandle, source: String) -> Result<(), 
     let url = tauri::Url::parse(url).map_err(|e| format!("登录页 URL 无效: {}", e))?;
     let script = qr_login_script(&source, auto_click);
     let nav_url = url.clone();
-    let win = WebviewWindowBuilder::new(&app, label, WebviewUrl::External(url))
+    // WebView2 浏览器参数必须与主窗口完全一致：同一用户数据目录下创建多个
+    // WebView2 Environment 时，参数不一致会导致 CreateCoreWebView2EnvironmentWithOptions
+    // 返回 0x8007139F（组或资源的状态不是执行请求操作的正确状态），窗口创建失败，
+    // 且 WebView2 浏览器进程异常可能导致整个程序闪退。
+    // 主窗口在 tauri.conf.json 中配置了 --disable-gpu（性能模式 WBMusic-Lite），
+    // 这里动态读取主窗口配置，保证扫码窗口与主窗口使用完全相同的参数。
+    let main_browser_args = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .or_else(|| app.config().app.windows.first())
+        .and_then(|w| w.additional_browser_args.clone());
+    let mut builder = WebviewWindowBuilder::new(&app, label, WebviewUrl::External(url))
         .title(title)
         .inner_size(520.0, 720.0)
         .min_inner_size(420.0, 600.0)
         .resizable(true)
         .center()
-        .initialization_script(&script)
-        .build()
-        .map_err(|e| format!("打开登录窗口失败: {}", e))?;
+        .initialization_script(&script);
+    if let Some(args) = main_browser_args {
+        builder = builder.additional_browser_args(&args);
+    }
+    let win = builder.build().map_err(|e| {
+        // 清理可能残留的半初始化窗口，避免下次点击时被误判为已存在
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.close();
+        }
+        format!("打开登录窗口失败: {}", e)
+    })?;
 
     // 独立线程处理登录窗口会话：
     // 1) 清除上次登录遗留的 WebView2 会话数据——扫码窗口是真实浏览器会话，会把登录 Cookie

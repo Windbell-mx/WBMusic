@@ -64,6 +64,10 @@ export const usePlayerStore = defineStore('player', () => {
 
   /** 连续播放失败计数（防止自动跳歌死循环） */
   let consecutiveFailures = 0
+  /** 启动恢复阶段标志：恢复的歌曲无法播放（如登录已失效）时不自动跳歌刷屏 */
+  let isRestoring = false
+  /** 播放记录已作废标志：阻止后续 saveState 把失效歌单重新写回 localStorage */
+  let playbackInvalidated = false
 
   // ---- 全局唯一音频实例 ----
   const audio = new Audio()
@@ -82,6 +86,10 @@ export const usePlayerStore = defineStore('player', () => {
   // ---- 播放记录：保存 / 调度 / 恢复 ----
   function saveState() {
     try {
+      // 播放记录已作废（整张歌单无法播放被清除）：跳过所有后续写盘，
+      // 直到用户重新成功播放一首歌（audio.pause 的 pause 事件是异步派发的，
+      // 会在清除之后触发 saveState，这里必须拦截，否则失效歌单又被写回）
+      if (playbackInvalidated) return
       const state: SavedPlayerState = {
         version: 1,
         playlist: playlist.value,
@@ -100,6 +108,23 @@ export const usePlayerStore = defineStore('player', () => {
   function scheduleSave(delay = 300) {
     if (saveTimer) clearTimeout(saveTimer)
     saveTimer = setTimeout(saveState, delay)
+  }
+
+  /**
+   * 清除本地保存的播放记录（含待执行的防抖保存）。
+   * 登录失效/整张歌单无法播放时调用，避免下次启动重复恢复同一批失败歌曲。
+   */
+  function clearSavedPlayback() {
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = null
+    }
+    playbackInvalidated = true
+    try {
+      localStorage.removeItem(STORAGE_KEY)
+    } catch {
+      /* 存储不可用时忽略 */
+    }
   }
 
   function restoreState() {
@@ -251,15 +276,36 @@ export const usePlayerStore = defineStore('player', () => {
       e instanceof Error && e.message && e.message !== '未获取到有效播放地址'
         ? e.message
         : '可能为 VIP 专享或无版权'
-    // 播放列表只剩一首，或整圈全部失败：停止播放，避免无限跳歌
+
+    // 启动恢复阶段失败（典型场景：登录已失效，整张恢复的歌单都无法播放）：
+    // 不自动跳歌刷屏，只提示一次，并清除播放记录避免下次启动再次恢复失败歌曲
+    if (isRestoring) {
+      isRestoring = false
+      consecutiveFailures = 0
+      audio.pause()
+      audio.removeAttribute('src')
+      clearSavedPlayback()
+      message.warning(
+        `「${track.title}」无法播放：${reason}。已停止恢复上次的播放列表，请重新登录后再试`,
+      )
+      return
+    }
+
+    // 播放列表只剩一首，或整圈全部失败：停止播放，避免无限跳歌；
+    // 同时清除播放记录，防止重启后再次恢复这批无法播放的歌曲
     if (playlist.value.length <= 1 || consecutiveFailures >= playlist.value.length) {
       consecutiveFailures = 0
       audio.pause()
       audio.removeAttribute('src')
+      clearSavedPlayback()
       message.warning(`「${track.title}」无法播放：${reason}`)
       return
     }
-    message.error(`「${track.title}」播放失败已自动跳过：${reason}`)
+
+    // 连续失败超过 3 首后静默跳过，避免刷屏（整圈结束时已有汇总提示）
+    if (consecutiveFailures <= 3) {
+      message.error(`「${track.title}」播放失败已自动跳过：${reason}`)
+    }
     nextTrack()
   }
 
@@ -292,6 +338,7 @@ export const usePlayerStore = defineStore('player', () => {
         })
       }
       consecutiveFailures = 0 // 播放成功，重置失败计数
+      playbackInvalidated = false // 恢复持久化：用户已成功播放，重新开始记录进度
     } catch (e) {
       if (isTauri) {
         // 真机环境：明确提示并自动跳过，绝不静默播放测试音频
@@ -524,7 +571,12 @@ export const usePlayerStore = defineStore('player', () => {
   // ---- 初始化：恢复上次播放记录（仅恢复歌曲与进度，不自动播放）----
   restoreState()
   if (currentIndex.value >= 0) {
-    loadCurrent(false)
+    // 标记恢复阶段：若恢复的歌曲无法播放（如登录已失效），
+    // 只提示一次且不自动跳歌、清除失效播放记录，避免循环弹错
+    isRestoring = true
+    loadCurrent(false).finally(() => {
+      isRestoring = false
+    })
   }
 
   // ---- 状态变化自动持久化 ----
